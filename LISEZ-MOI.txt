@@ -1,0 +1,640 @@
+GAMEBOOST 3.1 - Optimiseur de jeu (Windows 10 / 11)
+================================================
+
+INSTALLATION (recommande)
+1. Double-clique sur GameBoost-Setup.exe et clique "Oui" a la question de
+   Windows (installer dans Program Files demande les droits administrateur).
+2. Clique sur Installer. GameBoost est alors une application Windows normale :
+   - installe dans C:\Program Files\GameBoost ;
+   - raccourci dans le menu Demarrer (et sur le Bureau si tu le coches) ;
+   - visible dans Parametres > Applications > Applications installees,
+     avec son bouton Desinstaller.
+3. Option "Lancer GameBoost sans la question de Windows a chaque fois"
+   (cochee par defaut) : GameBoost a besoin des droits administrateur pour
+   regler Windows. Avec cette option, Windows ne redemande plus la
+   confirmation a chaque lancement.
+
+SANS INSTALLER (version portable)
+- Double-clique sur GameBoost.exe, ou tu veux. Windows demande alors la
+  confirmation administrateur a chaque lancement.
+
+Si Windows affiche "Windows a protege votre ordinateur" : clique sur
+"Informations complementaires" puis "Executer quand meme".
+(C'est normal pour un programme maison non signe numeriquement.)
+Si ton antivirus met GameBoost en quarantaine, c'est une fausse alerte du
+meme genre : restaure le fichier et ajoute-le en exception.
+
+DESINSTALLER
+- Parametres > Applications > Applications installees > GameBoost >
+  Desinstaller. Pour remettre Windows comme avant, clique d'abord sur
+  TOUT RESTAURER dans GameBoost.
+
+NOUVEAU EN 3.1
+- GameBoost tourne sous son propre nom : plus aucun PowerShell dans la barre
+  des taches ni dans le Gestionnaire des taches.
+- Installateur et desinstallateur, nouveau logo.
+- Le code est ouvert (licence MIT) : dossier "source", avec build.ps1 pour
+  reconstruire GameBoost.exe et GameBoost-Setup.exe sans rien installer.
+  "Lancer GameBoost.bat" (dans source) lance le script directement.
+NOUVEAU EN 3.0 : 3 MODELES DANS LE MEME GAMEBOOST.EXE
+- Au premier lancement, choisis ton GameBoost (modifiable a tout moment :
+  menu Affichage > Modele, GameBoost se relance tout seul) :
+  NEXUS : le plus complet, look cyberpunk. Tous les reglages, page Capteurs
+          (temperatures et courbes), tous les outils.
+  ARENA : le mode gaming. Gros bouton BOOST, HUD FPS / CPU / GPU avec
+          temperatures, bibliotheque de jeux, presets LOADOUT, ARSENAL.
+  PURE  : le plus simple, look epure clair. Un bouton, 5 interrupteurs,
+          tes jeux. Tout le reste est dans les menus du haut.
+- Les trois utilisent le meme moteur et les memes reglages.
+
+ICONE PRES DE L'HORLOGE (en bas a droite)
+- La croix de la fenetre range GameBoost pres de l'horloge au lieu de le fermer
+  (option a cocher dans le menu GameBoost ou dans le clic droit sur l'icone).
+- Clic gauche sur l'icone : ouvre GameBoost.
+- Clic droit : panneau rapide, tout se regle directement : Ouvrir, etat du PC
+  (CPU, GPU, RAM en % + temperature en couleur, mis a jour toutes les 2 s), BOOST,
+  un curseur de luminosite par ecran, Eteindre / Rallumer chaque ecran,
+  limite de FPS en un clic, option de la croix, Quitter (tout est remis comme avant).
+  Clic ailleurs ou Echap : le panneau se ferme.
+- Raccourci Ctrl+Alt+F7 (modifiable dans GameBoost > Raccourcis clavier) : ouvre ou ferme
+  ce panneau en bas a droite de l'ecran, meme pendant un jeu ou une autre appli.
+
+MENUS ET RACCOURCIS CLAVIER (tout est personnalisable)
+- Barre de menus en haut : GameBoost, Boost, Performances, Ecrans, Jeux,
+  Outils, Affichage, Aide. Chaque option y est, avec son raccourci.
+- GameBoost > Raccourcis clavier... : change n'importe quel raccourci.
+  Les raccourcis "globaux" marchent meme en jeu. Par defaut :
+  Ctrl+Alt+F8 fenetre, F9 boost, F10 overlay, F11 TURBO, F12 GPU ;
+  Ctrl+Alt+Maj+F1 a F6 : eteindre / rallumer l'ecran 1 a 6 ;
+  Ctrl+Alt+Maj+F12 : rallumer tous les ecrans ; Ctrl+1... : pages.
+- Ctrl+Alt+lettre ou chiffre est refuse : c'est AltGr sur un clavier
+  francais (@ # { [ ...), cela bloquerait la frappe dans tout Windows.
+
+ECRANS : ETEINDRE UN ECRAN (2 ecrans ou plus)
+- Menu Ecrans ou outil ECRANS : clique sur un ecran pour l'eteindre ou le
+  rallumer. GameBoost essaie dans l'ordre : mise en veille de l'ecran (DDC),
+  retirer l'ecran du bureau (position et resolution remises a l'identique),
+  ou voile noir (double-clic ou Echap pour le retirer).
+- Le dernier ecran allume ne s'eteint jamais. Tout est rallume quand tu
+  fermes GameBoost (et au demarrage suivant apres un arret brutal).
+- Pour verifier tes ecrans une fois : dossier "Test ecrans" > Lancer le
+  test.bat (resultat sur le Bureau).
+
+ECRAN ET FPS (accueil des 3 modeles, menus Ecrans et Performances)
+- Luminosite de chaque ecran : celui du portable par Windows, un ecran externe
+  par le cable (DDC/CI). Raccourcis possibles : luminosite +/- 10 % sur
+  l'ecran ou se trouve la souris (a choisir dans Raccourcis clavier).
+- Limite de FPS pour tous les jeux (pilote NVIDIA) : moins de FPS = PC plus
+  frais et silencieux. Conseil : 3 sous la frequence de l'ecran. S'applique
+  aux jeux lances ensuite ; TOUT RESTAURER remet la valeur d'origine.
+- Frequence de l'ecran : bouton pour passer a la frequence maximale.
+
+LANCEMENTS LIES : REUNIR DEUX .EXE
+- Menu Jeux > Lancements lies : quand A demarre, GameBoost lance B (delai
+  au choix), sans droits administrateur. Options : fermer B avec A, dans
+  les deux sens, arguments.
+- "Raccourci sur le Bureau" : un raccourci "A + B" qui lance les deux,
+  meme sans GameBoost ouvert.
+
+TEMPERATURES (CAPTEURS)
+- Carte graphique, puce graphique et SSD lus par Windows ; processeur et
+  ventilateurs via le BIOS du constructeur quand il le permet (Lenovo...).
+  Rien n'est invente : "n/d" = non donne par ce PC (raison en infobulle).
+- Fenetre Capteurs > "Tester les sources (10 s)" pour verifier.
+
+VERIFICATION AUTOMATIQUE (toutes les minutes)
+- Config, TURBO / GPU, ecrans, liens, raccourcis, capteurs et journal sont
+  controles chaque minute ; un probleme est corrige si possible et ecrit
+  une seule fois dans le journal.
+COMPATIBILITE
+- Windows 10 (toutes versions) et Windows 11 (toutes versions, 24H2/25H2
+  compris), editions Famille, Pro, Education, Entreprise, LTSC.
+- Tous les processeurs : Intel / AMD 64 bits, Windows 32 bits, et PC ARM
+  (Snapdragon / Copilot+ PC). GameBoost.exe est un seul fichier universel.
+- PC fixes et portables, y compris les portables recents en "veille
+  moderne" : GameBoost utilise alors le mode d'alimentation Windows
+  "Meilleures performances" (methode recommandee par Microsoft).
+- Ecrans en 100 %, 125 %, 150 %, 200 %... : texte net (plus de flou sur
+  les portables zoomes) et toutes les fenetres a la bonne taille ; petits
+  ecrans (ex : portable 1366x768, ou 1080p zoome a 150 %) : TOUTES les
+  fenetres (principale, pilotes, Config Windows, desinstallation...) restent
+  dans l'ecran, avec barre de defilement si besoin.
+- Fluidite (2.6) : la fenetre s'affiche environ 2 fois plus vite (infos du
+  PC et verifications lues en arriere-plan), listes et panneaux sans
+  scintillement, defilement des listes fluide meme avec beaucoup de lignes.
+- Windows 32 bits, 64 bits et ARM : meme fichier, mesures verifiees.
+- Si un antivirus bloque le code compile de GameBoost, l'appli repasse
+  toute seule sur l'interface Windows classique et les mesures WMI : tout
+  continue de fonctionner (boost, restauration, rapport).
+- Si les compteurs de performance de Windows sont abimes ou absents,
+  GameBoost le detecte au demarrage et utilise une autre methode.
+- Windows en francais, anglais ou autre langue ; noms d'utilisateur avec
+  accents, espaces ou crochets.
+- Reseaux qui bloquent le ping (box, entreprise, VPN) : mesure par TCP.
+- Si quelque chose bloque le demarrage (antivirus, Controle intelligent des
+  applications, Windows en mode S, PC d'entreprise), GameBoost affiche un
+  message qui explique pourquoi au lieu de ne rien faire.
+- Non compatible : Windows 7 / 8.1 (plus pris en charge par Microsoft ni
+  par Steam et la plupart des jeux) et Windows 10/11 en "mode S" (bloque
+  toute application hors Microsoft Store).
+
+FENETRE PRINCIPALE (2.6) : 4 PAGES, BOOST TOUJOURS VISIBLE
+- A gauche, toujours visibles : les pages, l'etat du mode jeu, le gros
+  bouton BOOST et l'interrupteur "Boost automatique".
+- Accueil : resume en 3 tuiles cliquables (niveau gaming, jeux suivis,
+  niveau de Windows), jauges en direct (processeur, carte graphique, puce
+  graphique integree, memoire, ping ; FPS et charge du jeu pendant le boost)
+  et journal. Un bandeau jaune apparait quand un nouveau pilote de carte
+  graphique existe (clique dessus pour l'installer).
+- Mes jeux : ta liste de jeux (nom du jeu + nom du programme), ajout par le
+  .exe ou parmi les programmes ouverts, detection des jeux populaires, et les
+  apps autorisees (jamais fermees pendant le boost).
+- Optimisations : curseur NIVEAU GAMING puis toutes les options rangees par
+  theme (pendant le boost, anti-saccades et avance, mesure et demarrage).
+  Engrenage a droite d'une option = ses reglages.
+- Outils : Config Windows, Mes parties, Desinstallation profonde, Pilotes,
+  Diagnostic PC, Priorite des applis, Rapport pour Claude, Copier les specs,
+  Ouvrir les logs et TOUT RESTAURER (clic droit : plus d'options).
+- Bouton TURBO : ON / OFF (colonne de gauche, au-dessus de BOOST). OFF = le
+  turbo du processeur est coupe quand tu ne joues pas : il reste a sa
+  frequence de base (ex. 2,4 GHz au lieu de 4,3 GHz) et chauffe beaucoup
+  moins. Pendant le boost, le turbo revient tout seul a fond. Quand tu fermes
+  GameBoost ou avec TOUT RESTAURER, le reglage d'origine est remis.
+- Engrenage a cote de TURBO : choisis les GHz maximum de chaque mode (curseur ou
+  valeur tapee a la main, par pas de 0,1 GHz). TURBO ON s'applique aussi pendant
+  le boost (ex. 4,2 GHz : presque autant d'images par seconde, bien moins chaud) ;
+  case 'Sans limite' = turbo d'origine. TURBO OFF : frequence de base conseillee.
+  Couleurs : vert = conseille, bleu = plus frais, jaune = plus chaud, rouge = trop
+  lent. Bouton 'Valeurs conseillees' (calculees pour ton processeur).
+- Analyse du processeur (a la 1re ouverture de l'engrenage, ~3 s, bouton
+  'Analyser' pour refaire) : marque (Intel, AMD, Qualcomm ARM), modele, gamme
+  (portable gaming HX/H/HS, basse consommation U/P/V, PC fixe K/X/X3D...), coeurs,
+  threads, hybride, frequence de base et turbo maximum MESURE. Valeurs conseillees :
+  PC fixe = turbo sans limite en jeu ; portable = 86 a 90 % du turbo maximum ;
+  hors jeu = frequence de base (2,4 GHz si la base est tres basse). La mesure la
+  plus haute est gardee (un processeur chaud monte moins haut).
+- Compatible tous processeurs : si le PC ne permet pas de regler la vitesse (PC
+  virtuel, PC d'entreprise, plan verrouille), la fenetre l'explique et rien n'est
+  change ; si Windows refuse un changement, le journal le dit.
+- Bouton GPU : ON / ECO (au-dessus de TURBO) + engrenage. Analyse de la carte
+  graphique (marque, modele, memoire, pilote, frequence max, puissance). ECO =
+  frequence limitee hors jeu (conseille 45 % du maximum : carte plus froide,
+  ventilateurs plus calmes) ; pendant le boost plus aucune limite. GPU ON :
+  sans limite (conseille en jeu) ou frequence choisie (curseur ou valeur tapee).
+  OC : puissance au maximum autorise par NVIDIA pendant le boost (cartes qui le
+  permettent ; verrouillee sur la plupart des portables). Bouton vers le reglage
+  auto / overclocking officiel (NVIDIA App, AMD Adrenalin, Intel Graphics
+  Software). NVIDIA : reglage direct par l'outil officiel nvidia-smi. AMD,
+  Intel : analyse + logiciel du fabricant (pas d'outil officiel en ligne de
+  commande ; GameBoost n'installe aucun pilote d'overclocking). Tout est remis
+  a la fermeture, avec TOUT RESTAURER et apres un arret brutal.
+- Applis sur la carte graphique (engrenage GPU) : comme Parametres Windows >
+  Affichage > Graphiques. Ajoute un .exe ou une appli ouverte et choisis
+  Hautes performances, Economie d'energie ou Windows decide. Choix permanent,
+  pris en compte au prochain lancement de l'appli, toutes marques.
+- Accueil : petite fleche sur les jauges GPU PROC et GPU CARTE. Un clic ouvre
+  'Applis sur les cartes graphiques' : quelles applis utilisent chaque carte, en
+  temps reel (chaque seconde, comme le Gestionnaire des taches). Glisse une appli
+  d'une carte vers l'autre (ou clic droit) : elle y tournera a son prochain
+  lancement. Les applis de Windows ne se deplacent pas. Re-clic = fermer.
+- Raccourcis clavier : Ctrl+1 Accueil, Ctrl+2 Mes jeux, Ctrl+3
+  Optimisations, Ctrl+4 Outils.
+- La fenetre tient sur les petits ecrans (920 x 640 a 100 %). Toutes les
+  listes deroulantes sont sombres, comme le reste de l'interface.
+CURSEURS DE NIVEAU (2.6) : PLUS OU MOINS OPTIMISE, EN UN GESTE
+- NIVEAU GAMING (page Optimisations, en haut) : 5 crans.
+    Leger      : alimentation au max, priorite au jeu. Rien n'est ferme.
+    Equilibre  : + applis inutiles fermees (rouvertes apres), services en
+                 pause, RAM liberee, launchers en priorite basse.
+    Conseille  : + anti-saccades et plan USB / PCIe / processeur au max.
+    Competitif : + souris sans acceleration, Nagle coupe (jeu en ligne).
+    Extreme    : + fermeture FORCEE des applis (confirmation demandee).
+  Glisse puis lache : les cases du boost se cochent toutes seules. Tu peux
+  ensuite changer une case a la main : le curseur affiche "personnalise".
+  Le mode auto, le demarrage avec Windows et la mesure des FPS restent a
+  ton choix.
+- NIVEAU D'OPTIMISATION WINDOWS (en haut de Config Windows) : 6 crans.
+    Avant GameBoost, Leger, Equilibre, Conseille, Pousse, Maximum.
+  En lachant le curseur, GameBoost affiche la liste exacte des changements
+  (et les avertissements) avant d'appliquer. "Etat actuel" montre le niveau
+  reel du PC. En redescendant, GameBoost ne remet que ce qu'IL a change : les
+  reglages que tu avais deja faits toi-meme ne sont jamais touches. Les gouts
+  personnels (theme, alignement, localisation...) ne sont pas geres par le
+  curseur.
+
+CONFIG WINDOWS (2.6, page Outils, tuile violette)
+Centre de reglages complet de Windows. A gauche : une case de recherche (tape
+un mot, ex. "souris", pour trouver un reglage dans toutes les pages) et les
+sections :
+- LOGICIELS ET APPLIS
+    * Applis Windows : 4 onglets.
+      - Applis du Store : toutes les applis supprimables du PC (+ celles qu'on
+        connait mais qui ne sont pas installees). Vert = conseille.
+        "Empecher Windows de les reinstaller" cree une tache planifiee VISIBLE
+        (\GameBoost\SuppressionApplis, compte SYSTEM) qui les supprime de
+        nouveau a chaque demarrage. Bouton "Arreter la persistance" pour
+        l'enlever. Script dans C:\ProgramData\GameBoost\Scripts (dossier
+        protege). "Reinstaller" ouvre le Microsoft Store et retire l'appli de
+        la persistance. Colonne "Reinstallation" : impossible si Microsoft l'a
+        retiree du Store (Cortana, Skype...).
+      - Capacites (WordPad, IE, Enregistreur d'actions, Fax...) et
+        Fonctionnalites (PowerShell 2.0, SMB1, Recall...) : suppression ou
+        reinstallation.
+      - OneDrive / Edge : desinstalle OneDrive. Edge n'est PAS supprime
+        (Windows et beaucoup d'applis en dependent) mais peut etre empeche de
+        tourner en arriere-plan (Jeu et performances).
+      Xbox, Game Bar, Store, Photos, Calculatrice, codecs, pilotes, WSL et
+      Terminal ne sont jamais proposes.
+    * Logiciels externes : 100 logiciels (navigateurs, launchers de jeux,
+      Discord, OBS, MSI Afterburner, 7-Zip, VLC, Visual C++...) installes ou
+      desinstalles en un clic via WinGet (outil officiel de Microsoft),
+      depuis la source officielle de chaque editeur. Etat "Installe" detecte,
+      filtre par categorie, recherche, double-clic = site officiel.
+- OPTIMISATIONS
+    * Confidentialite et securite : niveau UAC, publicite, telemetrie, suivi,
+      collecte de frappe, localisation, rapports d'erreurs, Copilot, Recall.
+    * Alimentation : liste des plans (activer / supprimer), ajout du plan
+      "Performances optimales", restauration des plans Windows ; demarrage
+      rapide, veille prolongee ; reglages CACHES du plan actif (boost du
+      processeur, parking des coeurs, EPP, USB, PCI Express, Wi-Fi, veille)
+      sur secteur et sur batterie, deverrouilles apres avertissement.
+    * Jeu et performances : Mode Jeu, HAGS, enregistrement Xbox, optimisations
+      plein ecran, priorite des jeux, souris, Maj x5, menus, Edge en
+      arriere-plan, + services Windows (telemetrie, fax, SysMain,
+      indexation...) en Desactive / Manuel / Automatique.
+    * Windows Update : mode Normal / Securite seulement (conseille) / Pause
+      jusqu'en 2051 / mises a jour auto coupees (deconseille) ; pas de
+      redemarrage auto, pas de P2P, ne pas remplacer tes pilotes...
+    * Notifications et Son (son de demarrage, baisse du son pendant les
+      appels vocaux, activation vocale).
+- PERSONNALISATION : theme clair / sombre, transparence, fond d'ecran assorti,
+  effets visuels ; barre des taches (alignement, recherche, regroupement,
+  secondes, boutons, nettoyage des icones epinglees avec sauvegarde) ; menu
+  Demarrer (recommandations, fichiers recents, Bing) ; Explorateur (menu clic
+  droit complet, "Prendre possession", extensions, fichiers caches, Acces
+  rapide, chemins longs...).
+- OUTILS : creation d'un fichier autounattend.xml (installation de Windows
+  sans compte Microsoft, sans les applis inutiles, option pour passer les
+  verifications Windows 11) a copier sur la cle USB d'installation ;
+  Sauvegarde / import de tous tes reglages dans un fichier .json (apercu des
+  changements avant d'importer).
+- NOUVEAU (2.6) :
+    * Demarrage de Windows : liste de tous les programmes lances avec
+      Windows (registre + dossier Demarrage), desactiver / reactiver comme
+      dans le Gestionnaire des taches (rien n'est supprime).
+    * Reseau : choix du DNS (Cloudflare, Google, Quad9, Familles ou
+      automatique ; remis a l'origine par "Tout annuler"), vider le cache DNS,
+      reparer la connexion (Winsock + TCP/IP), limitation reseau multimedia.
+    * Nettoyage : fichiers temporaires, telechargements de Windows Update,
+      rapports d'erreurs, miniatures, caches de shaders DirectX / NVIDIA /
+      AMD / Intel, Corbeille. Taille de chaque element affichee avant.
+    * Outils avances : reparer Windows (DISM + SFC), creer un point de
+      restauration, ouvrir la Restauration du systeme.
+    * Nouveaux reglages : optimisations des jeux en fenetre et VRR (Windows
+      11), priorite processeur au premier plan, bouton Xbox de la manette,
+      repetition clavier rapide, correctif de scintillement (MPO), bridage
+      d'alimentation, taches planifiees de telemetrie, recherche cloud,
+      execution automatique des cles USB, Galerie / Accueil de l'Explorateur,
+      chemin complet, Assistant stockage. Les curseurs de niveau les
+      prennent en compte.
+    * Widgets : si Windows bloque le reglage (protection UCPD), GameBoost
+      retire le composant Widgets (reinstallable depuis le Microsoft Store).
+    * Alimentation : plus de doublons "Performances optimales", bouton
+      "Supprimer les doublons".
+    * Mises a jour des logiciels : liste de tous tes logiciels qui ont une
+      version plus recente (WinGet), mise a jour de la selection ou de tout.
+    * Sante du PC : etat et usure des disques, temperature, espace libre,
+      memoire (alerte si la RAM ne tourne pas a sa vitesse : profil XMP / EXPO
+      a activer dans le BIOS sur un PC fixe), ecrans (bouton "Passer a X Hz"
+      si un ecran n'est pas a sa frequence maximale), batterie (sante,
+      cycles, rapport complet), temps depuis le dernier redemarrage.
+    * Nettoyage automatique chaque semaine (case sur la page Nettoyage) :
+      tache visible \GameBoost\NettoyageHebdo, elements conseilles seulement.
+- MES PARTIES (page Outils) :
+    * Historique de toutes tes sessions de boost (FPS, 1 % bas, CPU, GPU,
+      RAM, ping, duree), filtre par jeu, graphique des 30 dernieres parties
+      et "effet du boost" : FPS moyen avec boost contre mode comparaison.
+    * Overlay en jeu : petit cadre FPS / 1 % bas / CPU / GPU / RAM / ping
+      par-dessus le jeu pendant le boost (coin au choix, la souris passe a
+      travers, mis a jour toutes les 5 s, aucune charge en plus). Visible en
+      plein ecran fenetre / sans bordure.
+    * Sauvegarde de tes sauvegardes de jeux : zip de Saved Games,
+      Documents\My Games, Steam userdata (et AppData\LocalLow si tu veux),
+      a mettre sur un autre disque ou une cle USB.
+- OPTIMISATIONS PERMANENTES D'UN JEU : clic droit sur un jeu de "Mes jeux" >
+  "Optimisations permanentes de ce jeu..." : toujours sur la carte graphique
+  puissante, optimisations plein ecran desactivees, priorite processeur
+  haute a chaque lancement. Actives meme sans GameBoost ; decocher = retour
+  au reglage normal de Windows.
+- PROFILS DE JEU (page Mes jeux) : clic droit sur un jeu de "Mes jeux"
+  > choisis son niveau (Leger ... Extreme). Quand ce jeu est lance, le boost
+  utilise ce niveau au lieu de celui du curseur. Le profil s'affiche en
+  couleur a droite du nom du jeu.
+- Chaque ligne : badge "conseille", "attention", "+ Explorateur",
+  "+ redemarrage", et "+ details" = cle de registre, valeur actuelle, valeur
+  par defaut de Windows et portee (ton compte / tout le PC).
+- Tout est applique UNE fois : GameBoost ne reapplique rien en arriere-plan
+  (sauf la suppression persistante des applis, si tu l'actives).
+- Chaque interrupteur montre l'etat REEL du PC et s'applique tout de suite.
+- "Appliquer les reglages conseilles" : active seulement les reglages surs.
+- "Tout annuler" : remet les valeurs d'origine (gardees dans
+  %APPDATA%\GameBoost\config_windows_origine.json). C'est separe de TOUT
+  RESTAURER (qui concerne le boost).
+- Un point de restauration Windows est cree avant la premiere modification.
+- Certains reglages demandent de relancer l'Explorateur (bouton) ou de
+  redemarrer le PC : c'est indique sur la ligne.
+
+DESINSTALLATION PROFONDE (2.5, page Outils, tuile jaune)
+- Liste des programmes installes (avec recherche) et des applis du Store.
+- "Desinstaller en profondeur" (ou double-clic) :
+    1. point de restauration Windows,
+    2. fermeture du programme s'il est ouvert,
+    3. son desinstalleur officiel se lance (reponds a ses questions),
+    4. GameBoost cherche TOUT ce qu'il a laisse : dossiers caches (AppData,
+       LocalLow, ProgramData, Program Files, Temp), raccourcis (menu
+       Demarrer, Bureau, barre des taches), cles de registre, entree restee
+       dans la liste des programmes, lancement au demarrage, services
+       Windows, taches planifiees, regles du pare-feu.
+    5. Tu vois la liste AVANT toute suppression. Coche = surement laisse par
+       le programme. En jaune = a verifier (Documents, sauvegardes de jeu,
+       nom proche) : jamais coche d'office.
+- "Nettoyer les restes seulement" : pour un programme deja desinstalle ou
+  dont le desinstalleur est casse.
+- Securite : les fichiers vont dans la CORBEILLE ; le registre, les services
+  et les taches sont sauvegardes dans %APPDATA%\GameBoost\desinstallations
+  (double-clic sur un .reg pour le remettre). Les dossiers de Windows et les
+  dossiers qui contiennent un AUTRE programme installe ne sont jamais
+  touches. Pilotes, runtimes (Visual C++, .NET) et anti-triche sont signales
+  en gris : rien n'est coche d'office pour eux.
+
+APPS AUTORISEES (page Mes jeux) : BOUTONS AJOUTER ET RETIRER
+- "+" : ajoute des applications ouvertes ou un .exe a la liste autorisee.
+- "-" : retire des applications de la liste (coche celles a retirer).
+  Astuce : selectionne une ligne dans la liste avant de cliquer sur "-",
+  elle sera deja cochee. Discord est signale (vocal en jeu).
+
+BOOST MANUEL (2.4)
+- Le boost se lance UNIQUEMENT avec le bouton BOOST (ou le menu pres de
+  l'horloge). Quand tu cliques sur ARRETER, il s'arrete et ne se relance
+  pas tout seul, meme si ton jeu ou son launcher est encore ouvert.
+- "Mode auto" reste disponible si un jour tu veux le boost automatique :
+  meme coche, un arret manuel est respecte jusqu'a la fermeture du jeu.
+- Mesure des FPS : GameBoost attend le vrai jeu (ex. League of Legends)
+  et ne mesure plus les launchers (client Riot, Steam, Epic...).
+- "Liberer la RAM" ne vide plus rien quand la RAM n'est pas pleine
+  (plus de 25 % disponible) : vider la memoire pour rien obligeait
+  Windows a la relire sur le disque, ce qui creait des saccades. Discord,
+  les launchers et l'anti-triche ne sont jamais touches.
+
+LOGICIEL OPTIMISE 2.2 (zero latence)
+- Mesures lues directement dans les compteurs de Windows (comme le
+  Gestionnaire des taches) au lieu de WMI : plus de pics du processus
+  "WmiPrvSE" toutes les 5 secondes pendant tes parties, et une mesure
+  complete prend quelques millisecondes au lieu de plusieurs centaines.
+- Ping fait en arriere-plan : la fenetre ne se fige plus jamais en
+  attendant le reseau.
+- Liste des processus lue en un seul appel systeme ; un seul parcours par
+  seconde partage entre la detection du jeu, la priorite et les FPS.
+- Lecture des FPS (PresentMon) en code compile.
+- Pendant le jeu, GameBoost passe en priorite basse et en mode economie
+  (sur les processeurs Intel 12e gen et plus, comme ton i7-13650HX, il
+  tourne sur les petits coeurs et laisse les gros coeurs au jeu). La
+  mesure des FPS garde une priorite haute pour ne rater aucune image.
+- Fenetre cachee pres de l'horloge et pas de jeu : GameBoost ne mesure
+  rien (quasi 0 % de processeur).
+- Demarrage plus rapide : le code est compile une seule fois puis garde
+  dans C:\ProgramData\GameBoost\cache (dossier protege, modifiable
+  seulement par les administrateurs).
+- Securite : si les compteurs Windows donnent des valeurs incoherentes,
+  GameBoost repasse tout seul sur l'ancienne methode (WMI). Le journal
+  indique la methode utilisee (ligne "Moteur").
+
+NOUVEAU LOOK 2.1 (neo-futuriste / cyberpunk)
+- Interface sombre et neon : boutons a coins coupes, interrupteurs a la
+  place des cases a cocher, jauges CPU / GPU / RAM / PING en bas
+  (cyan = normal, jaune = charge, rose = presque plein).
+- Animations courtes et utiles seulement : survol et appui des boutons,
+  glissement des interrupteurs, changement de couleur BOOST <-> ARRETER,
+  balayage lumineux quand le boost s'active, texte d'etat qui se "decode".
+- Aucune animation quand la fenetre est reduite ou cachee pres de
+  l'horloge : zero cout pendant que tu joues.
+- Si tu as coupe "Effets d'animation" dans Windows (Parametres >
+  Accessibilite > Effets visuels), GameBoost ne garde que les fondus de
+  couleur, sans mouvement.
+- Si un antivirus bloque le nouveau theme, GameBoost reprend tout seul
+  l'interface Windows classique (rien ne change dans les optimisations).
+
+REGLAGES DETAILLES
+- Petit engrenage a cote d'une option = ses reglages :
+    * Fermer les autres applications : liste des programmes fermes meme sans
+      fenetre (modifiable, bouton "Liste par defaut").
+    * Services en pause : choisis lesquels (avec leur etat actuel).
+    * Plan d'alimentation : curseurs pour le mode d'alimentation Windows
+      (Efficacite / Equilibre / Meilleures performances) et l'etat minimal /
+      maximal du processeur pendant le boost. Astuce portable : maximum a
+      99 % = turbo coupe, beaucoup moins chaud et bruyant.
+    * Priorite du jeu : curseur Normale / Au-dessus / Haute.
+    * Priorite des launchers : curseur Basse / Sous la normale + liste.
+    * Anti-saccades (cache RAM) : comme ISLC, avec l'affichage en direct du
+      cache en attente et de la memoire libre, les seuils de vidage, le
+      delai minimum, et la surveillance permanente (meme hors jeu).
+- Bouton "Vider" a cote d'Anti-saccades : vide le cache memoire maintenant.
+- "+" a cote des Apps autorisees : coche des applis parmi celles ouvertes ou
+  choisis un .exe, sans rien taper.
+- Tuile "Priorite des applis" (page Outils) : chaque logiciel ouvert avec son icone et
+  un curseur Basse -> Sous normale -> Normale -> Au-dessus -> Haute.
+  "Retenir" = GameBoost remet cette priorite a chaque lancement de l'appli.
+  Bouton Actualiser + actualisation automatique quand une appli s'ouvre.
+  Le niveau "Temps reel" n'est volontairement pas propose (il peut bloquer
+  la souris, le clavier et le son).
+- Les curseurs : clic ou glisser a la souris, molette (apres un clic dessus),
+  fleches du clavier, Debut / Fin.
+
+CARTE GRAPHIQUE DEDIEE ET PUCE INTEGREE
+- GameBoost separe la carte graphique dediee (NVIDIA GeForce/RTX, AMD
+  Radeon RX, Intel Arc A/B) de la puce graphique integree au processeur
+  (Intel UHD/Iris/Arc integre, AMD Radeon 680M/780M/890M/Vega, Qualcomm
+  Adreno). Les ecrans virtuels et les NPU (puces IA) sont ignores.
+- Detection fiable sur tous les PC : informations du noyau graphique de
+  Windows (comme le Gestionnaire des taches), fabricant, memoire video,
+  emplacement PCI.
+- En bas de la fenetre, deux jauges separees :
+    * GPU CARTE (cyan) : la carte graphique, avec son nom et sa memoire
+      video (ex : "RTX 5070 | 5.2/8 Go"). Affiche "veille" quand la carte
+      dort (portable hybride au repos) au lieu de montrer l'usage de la
+      puce Intel par erreur.
+    * GPU PROCESSEUR (violet) : la puce integree au processeur
+      (ex : "Intel UHD | integre").
+  PC fixe sans puce integree : seulement GPU CARTE. PC sans carte
+  graphique : seulement GPU PROCESSEUR. Passe la souris sur une jauge
+  pour voir le nom complet et comment GameBoost l'a reconnue.
+- Reconnait toutes les marques : NVIDIA, AMD (Radeon RX / Radeon 680M a
+  890M / 8060S / Vega / anciens APU), Intel (UHD, Iris, Arc integre,
+  Arc A/B dedie), Qualcomm Snapdragon, et ignore les ecrans virtuels,
+  machines virtuelles (Parallels, VMware...) et puces IA.
+- Windows 10 avant la version 1709 (2017) n'a pas de compteur GPU :
+  les jauges affichent alors "n/d" (le reste marche normalement).
+- Pendant le jeu, ALERTE si le jeu tourne sur la puce integree au lieu de
+  la carte dediee (probleme frequent sur les portables).
+- PC fixe : alerte si l'ecran est branche sur la carte mere au lieu de la
+  carte graphique. Portable : conseil sur le mode MUX / dGPU.
+
+MISES A JOUR DES PILOTES (page Outils, tuile "Pilotes")
+- Analyse tous les composants : carte graphique, reseau, Wi-Fi, audio,
+  Bluetooth, chipset, stockage, USB, ecran, camera, + carte mere et BIOS.
+- Repere les peripheriques sans pilote ou en erreur, et les pilotes
+  generiques (ex : "Carte graphique de base Microsoft").
+- Cherche les pilotes plus recents sur Windows Update : ce sont les seuls
+  qui sont valides par Microsoft pour ton materiel exact. Coche ceux que tu
+  veux, clique "Installer la selection" : un point de restauration Windows
+  est cree avant.
+- Carte graphique (2.6) : GameBoost reconnait ta carte (NVIDIA, AMD, Intel)
+  et compare ton pilote a la DERNIERE version publiee sur le site officiel
+  du fabricant (NVIDIA : pilote Game Ready de ton modele exact ; AMD :
+  Adrenalin ; Intel : catalogue officiel Intel). Verification automatique
+  au demarrage, en arriere-plan, au plus une fois toutes les 12 h.
+  S'il existe un pilote plus recent : bandeau jaune sur l'Accueil, point jaune
+  sur "Outils" et la tuile devient "NOUVEAU PILOTE GPU !". Dans la fenetre des pilotes, la ligne de
+  la carte affiche "Nouveau pilote" et la version proposee ; double-clic =
+  telecharger l'installeur officiel (ou ouvrir la page du pilote).
+  Bouton "appli officielle" toujours disponible (NVIDIA App, AMD Adrenalin,
+  Intel Driver & Support Assistant).
+- Les mises a jour de BIOS / firmware proposees par le fabricant via Windows
+  Update sont signalees [BIOS / FIRMWARE] et jamais cochees d'office. Si tu
+  les choisis : PC branche, et ne l'eteins pas pendant le redemarrage.
+- Chaque composant affiche sa version actuelle et la mise a jour qui lui
+  correspond ("Mise a jour proposee"). Double-clic sur un composant (ou bouton
+  "Mettre a jour ce composant") = installer uniquement sa mise a jour. Pour
+  une carte graphique : ouvre l'appli officielle du fabricant.
+- La liste du bas indique pour chaque mise a jour le composant concerne,
+  y compris firmware/BIOS, logiciels du fabricant et peripheriques sans
+  pilote.
+- Le resultat de l'analyse est inclus dans le "Rapport Claude".
+
+UTILISATION
+- Ajoute ton jeu : "Ajouter un .exe..." (choisis l'exe du jeu) ou lance le jeu,
+  choisis-le dans la liste deroulante puis "Ajouter".
+- Mode auto (conseille) : laisse GameBoost ouvert (ou reduit dans la barre des
+  taches). Quand tu lances ton jeu, le boost s'active tout seul. Quand tu
+  quittes le jeu, tout revient a la normale.
+- Sinon : bouton BOOST / ARRETER LE BOOST.
+
+CE QUE FAIT LE BOOST
+- Ferme les applis ouvertes et les gourmandes en arriere-plan (navigateurs,
+  Spotify, OneDrive, Teams...) SAUF ton jeu, Discord, les launchers
+  (Steam, Epic, Riot, Battle.net...) et les anti-triche (Vanguard, EAC, BattlEye).
+- Met en pause : SysMain, l'indexation, la telemetrie, Windows Update.
+- Passe le PC en "Performances optimales".
+- Active le Mode Jeu de Windows.
+- Donne la priorite CPU haute au jeu.
+- Libere la RAM des autres programmes.
+- Tout est restaure a la fin (services, plan d'alimentation, applis rouvertes).
+
+Internet, le jeu en ligne et Discord (vocal compris) continuent de marcher
+normalement : rien ne touche au reseau.
+
+SECURITE : TOUT RESTAURER
+- Au tout premier lancement (avant le moindre boost), GameBoost enregistre
+  une SAUVEGARDE D'ORIGINE de tout ce qu'il peut modifier : plan
+  d'alimentation, registre (Mode Jeu, GPU, souris, reseau sur chaque carte)
+  et etat des services Windows.
+- Bouton rouge "TOUT RESTAURER" : arrete le boost et remet le PC exactement
+  comme dans cette sauvegarde. Il supprime aussi le plan "Performances
+  optimales" que GameBoost a cree.
+- Clic droit sur "TOUT RESTAURER" :
+    * Refaire la sauvegarde d'origine (si tu as change tes reglages expres)
+    * Ouvrir la restauration systeme de Windows
+    * Creer un point de restauration Windows maintenant
+- Avant le premier boost de la journee, GameBoost cree aussi un point de
+  restauration Windows (option cochee par defaut). Ca peut prendre jusqu'a
+  1 minute. Windows n'en garde qu'un par 24 h : si un point recent existe
+  deja, GameBoost le signale dans le journal.
+- Si le PC plante pendant un boost, la restauration se fait toute seule au
+  prochain lancement de GameBoost.
+
+OPTIONS AVANCEES (tout est restaure a la fin du boost)
+Astuce : clique sur "Reglages recommandes" pour cocher les options sures.
+Passe la souris sur une option pour voir son explication.
+
+- Jeux populaires : le boost se lance tout seul pour ~40 jeux (Valorant,
+  CS2, Fortnite, LoL, Apex, Rocket League, Roblox, EA FC, Marvel Rivals...).
+- Couper l'enregistrement Xbox : la Game Bar n'enregistre plus en fond
+  pendant le jeu (moins de charge GPU/disque).
+- Priorite basse pour launchers et utilitaires : Steam, Epic, Riot Client,
+  EA app, G Hub, iCUE... restent ouverts mais passent apres le jeu.
+  Discord n'est jamais touche (vocal).
+- Anti-saccades : si la RAM libre descend sous 1 Go pendant le jeu,
+  GameBoost vide la memoire "en attente" (meme methode que ISLC).
+- Priorite GPU : le planificateur de Windows favorise les jeux.
+- Plan GameBoost (PC fixe) : sur le plan cree par GameBoost uniquement,
+  USB sans mise en veille (souris/casque), PCI Express sans economie
+  d'energie, processeur a 100 %, disque jamais en veille. Ce plan est
+  supprime par TOUT RESTAURER.
+- Carte graphique puissante (portables a 2 GPU) : force la carte dediee
+  pour tes jeux (au lancement suivant du jeu).
+- Reseau (Nagle) : seulement utile pour les jeux en TCP (MMO, WoW).
+  Valorant, CS2, Fortnite utilisent UDP : aucun effet pour eux.
+- Souris : desactive l'acceleration pendant le jeu.
+- Services en pause en plus : partage des mises a jour (DoSvc) et rapports
+  d'erreurs Windows.
+- Lancer GameBoost au demarrage de Windows : demarre reduit pres de
+  l'horloge, sans demande administrateur, pour que le mode auto marche
+  toujours. (Fonctionne avec GameBoost.exe.)
+- Clic droit sur l'icone pres de l'horloge : Ouvrir / BOOST / Quitter.
+- Bouton "Copier les specs" : copie la config du PC pour Discord/forum.
+
+DIAGNOSTIC DU PC (bouton vert)
+Analyse et te dit quoi ameliorer, sans rien modifier :
+- ecran regle sur moins de Hz que possible (ex : 60 Hz au lieu de 144 Hz)
+- RAM : quantite, simple canal (1 seule barrette), XMP/EXPO desactive
+- disques presque pleins, Windows sur disque dur (HDD)
+- pilote de carte graphique trop ancien, Mode Jeu, planification GPU
+- portable sur batterie, Wi-Fi au lieu du cable, ping instable
+- PC pas redemarre depuis longtemps, mise a jour en attente
+- trop de programmes au demarrage, trop d'overlays
+Le resultat est aussi enregistre dans le fichier de log.
+
+SUIVI DES PERFORMANCES ET RAPPORT POUR CLAUDE
+1. Joue normalement avec GameBoost ouvert (mode auto ou bouton BOOST),
+   au moins 10-15 minutes.
+2. A la fin de la partie, GameBoost ecrit un RAPPORT DE SESSION :
+   - FPS moyen, 1% bas, 0,1% bas, saccades par minute, gels > 100 ms
+     (mesures avec PresentMon d'Intel : pas d'injection dans le jeu,
+     compatible anti-triche)
+   - processeur total ET coeur le plus charge, frequence du processeur
+     (detecte la surchauffe), carte graphique, memoire video, RAM,
+     lectures du fichier d'echange, disque, ping
+   - une ANALYSE (ce qui limite ton PC : processeur, carte graphique,
+     memoire video, RAM, disque, surchauffe, connexion)
+   - une chronologie minute par minute
+   - les programmes les plus gourmands pendant le jeu
+   - la comparaison avec ta partie precedente sur le meme jeu
+3. Clique sur "Rapport Claude" : un seul fichier
+   GameBoost_Rapport_<date>.txt est cree sur ton Bureau, avec ta config,
+   le diagnostic, l'historique de tes sessions, les 3 derniers rapports et
+   les erreurs. Envoie ce fichier a Claude.
+   (Ton nom d'utilisateur Windows est retire des chemins.)
+
+MODE COMPARAISON (pour voir le vrai effet de GameBoost)
+- Coche "Mode comparaison : mesurer SANS optimiser" : le bouton devient
+  MESURER (jaune) et rien n'est modifie, GameBoost mesure seulement.
+- Fais une partie comme ca, decoche, puis refais une partie en BOOST sur
+  le meme jeu (meme carte/mode si possible). Le rapport compare les deux.
+
+AUTRES FICHIERS (bouton "Ouvrir les logs")
+- GameBoost_AAAA-MM-JJ.log : journal du jour (actions, alertes, perfs).
+- rapport_session_....txt : rapport complet de chaque partie.
+- session_....csv : toutes les mesures toutes les 5 s (pour Excel).
+- Les logs de plus de 30 jours sont supprimes automatiquement.
+
+A SAVOIR
+- Par defaut les applis avec une fenetre recoivent une demande de fermeture
+  normale (elles peuvent te demander d'enregistrer). Coche "Forcer la
+  fermeture" seulement si tu n'as rien de non sauvegarde.
+- Ajoute dans "Apps autorisees" tout ce que tu veux garder (ex : obs64,
+  spotify, msiafterburner). Un nom par ligne, sans ".exe".
+- Le gain depend du PC : gros effet sur un PC avec peu de RAM ou beaucoup
+  d'applis ouvertes, effet faible sur un PC deja propre.
+- Astuce Discord : Parametres > Avance > desactive "Acceleration materielle"
+  pour qu'il utilise moins le GPU pendant que tu joues.
+- Reglages sauvegardes dans : %APPDATA%\GameBoost
