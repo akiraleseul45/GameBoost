@@ -4963,8 +4963,16 @@ function Invoke-Restore {
 $Script:ExePath = $null
 if ($IconPath -and $IconPath.ToLower().EndsWith('.exe') -and (Test-Path -LiteralPath $IconPath)) { $Script:ExePath = $IconPath }
 
+# La tache de demarrage est rangee dans le dossier de taches \GameBoost\ : une tache "GameBoost" a la racine
+# porte le meme nom que ce dossier, et Windows refuse alors de creer l'un ou l'autre.
+$Script:StartupTaskPath = '\GameBoost\'; $Script:StartupTaskName = 'Demarrage avec Windows'
 function Get-StartupTask {
-    try { return Get-ScheduledTask -TaskName 'GameBoost' -ErrorAction Stop } catch { return $null }
+    try { return Get-ScheduledTask -TaskPath $Script:StartupTaskPath -TaskName $Script:StartupTaskName -ErrorAction Stop } catch {}
+    try { return Get-ScheduledTask -TaskPath '\' -TaskName 'GameBoost' -ErrorAction Stop } catch { return $null }   # ancien emplacement
+}
+function Remove-GBLegacyStartupTask {
+    try { $old = Get-ScheduledTask -TaskPath '\' -TaskName 'GameBoost' -ErrorAction Stop; if ($old) { Unregister-ScheduledTask -TaskPath '\' -TaskName 'GameBoost' -Confirm:$false -ErrorAction Stop; return $true } } catch {}
+    return $false
 }
 
 function Set-StartupTask([bool]$enable) {
@@ -4977,10 +4985,14 @@ function Set-StartupTask([bool]$enable) {
             $trigger.Delay = 'PT20S'
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
             $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -Priority 4   # 4 = priorite normale (7 par defaut = ralenti)
-            Register-ScheduledTask -TaskName 'GameBoost' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "Lance GameBoost (reduit) a l'ouverture de session" -Force | Out-Null
+            [void](Remove-GBLegacyStartupTask)   # l'ancienne tache a la racine bloquerait la creation du dossier \GameBoost\
+            Register-ScheduledTask -TaskPath $Script:StartupTaskPath -TaskName $Script:StartupTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "Lance GameBoost (reduit) a l'ouverture de session" -Force -ErrorAction Stop | Out-Null
             Log "GameBoost se lancera tout seul a l'ouverture de session (reduit pres de l'horloge)"
         } else {
-            if (Get-StartupTask) { Unregister-ScheduledTask -TaskName 'GameBoost' -Confirm:$false; Log "Lancement automatique desactive" }
+            $had = [bool](Get-StartupTask)
+            try { Unregister-ScheduledTask -TaskPath $Script:StartupTaskPath -TaskName $Script:StartupTaskName -Confirm:$false -ErrorAction Stop } catch {}
+            [void](Remove-GBLegacyStartupTask)
+            if ($had) { Log "Lancement automatique desactive" }
         }
         return $true
     } catch { Log ("Demarrage auto : erreur (" + $_.Exception.Message + ")"); return $false }
@@ -5639,7 +5651,10 @@ $Script:StartupCheckScript = {
         $ram = [math]::Round([double]$os.TotalVisibleMemorySize / 1MB, 1)
         $sync.SysLine = "PC : " + $sync.PcType + " | " + $cpu + " (" + $sync.Cores + " threads) | " + $gpu + " | " + $ram + " Go RAM | " + $os.Caption + " " + $os.BuildNumber
     } catch {}
-    try { $t = Get-ScheduledTask -TaskName 'GameBoost' -ErrorAction Stop; $sync.TaskExists = $true; $sync.TaskExe = [string](@($t.Actions)[0].Execute) } catch { $sync.TaskExists = $false }
+    $sync.TaskExists = $false
+    foreach ($tp in @(@('\GameBoost\', 'Demarrage avec Windows'), @('\', 'GameBoost'))) {
+        try { $t = Get-ScheduledTask -TaskPath $tp[0] -TaskName $tp[1] -ErrorAction Stop; $sync.TaskExists = $true; $sync.TaskExe = [string](@($t.Actions)[0].Execute); break } catch {}
+    }
     $sync.InfoDone = $true
     try {
         . ([scriptblock]::Create($sync.Fn))

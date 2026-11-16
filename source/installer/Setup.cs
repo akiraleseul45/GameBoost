@@ -137,8 +137,11 @@ static class Setup {
 
         step(92, noPrompt ? "Reglage du lancement sans question..." : "Derniers reglages...");
         if (!TestMode) {
+            // L'ancienne tache de demarrage "GameBoost" (a la racine) porte le nom du dossier de taches \GameBoost :
+            // Windows refuse alors de creer le dossier. Elle est retiree d'abord, puis recreee dans le dossier si besoin.
+            bool legacy = RemoveLegacyStartupTask();
             if (noPrompt) RegisterTask(); else RemoveTask(TaskName);
-            if (startup == true) RegisterStartupTask(); else if (startup == false) RemoveStartupTask();
+            if (startup == true || (startup == null && legacy)) RegisterStartupTask(); else if (startup == false) RemoveStartupTask();
         }
         step(100, "Termine");
     }
@@ -179,7 +182,7 @@ static class Setup {
 
     // Tache "GameBoost" (racine) : la meme que l'option "Lancer GameBoost avec Windows" de l'application.
     // A l'ouverture de session, GameBoost demarre reduit pres de l'horloge, avec les droits administrateur.
-    const string StartupTask = "GameBoost";
+    const string StartupTask = "Demarrage avec Windows", LegacyStartupTask = "GameBoost";
     static void RegisterStartupTask() {
         string sid = WindowsIdentity.GetCurrent().User.Value;
         string xml =
@@ -199,21 +202,33 @@ static class Setup {
             "</Task>";
         dynamic svc = Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service"));
         svc.Connect();
-        svc.GetFolder("\\").RegisterTask(StartupTask, xml, 6, null, null, 3, null);
+        dynamic folder;
+        try { folder = svc.GetFolder(TaskFolder); } catch { folder = svc.GetFolder("\\").CreateFolder(TaskFolder.TrimStart('\\')); }
+        folder.RegisterTask(StartupTask, xml, 6, null, null, 3, null);
     }
     static void RemoveStartupTask() {
+        RemoveTask(StartupTask);
+        RemoveLegacyStartupTask();
+    }
+    // Renvoie vrai si l'ancienne tache existait (GameBoost se lancait donc avec Windows)
+    static bool RemoveLegacyStartupTask() {
         try {
             dynamic svc = Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service"));
             svc.Connect();
-            svc.GetFolder("\\").DeleteTask(StartupTask, 0);
-        } catch { }
+            dynamic root = svc.GetFolder("\\");
+            dynamic task = root.GetTask(LegacyStartupTask);   // leve une erreur si elle n'existe pas
+            bool on = (bool)task.Enabled;
+            root.DeleteTask(LegacyStartupTask, 0);
+            return on;
+        } catch { return false; }
     }
     // GameBoost se lance-t-il deja avec Windows ? (case cochee d'avance lors d'une mise a jour)
     public static bool HasStartupTask() {
         try {
             dynamic svc = Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service"));
             svc.Connect();
-            dynamic task = svc.GetFolder("\\").GetTask(StartupTask);
+            try { dynamic t1 = svc.GetFolder(TaskFolder).GetTask(StartupTask); return (bool)t1.Enabled; } catch { }
+            dynamic task = svc.GetFolder("\\").GetTask(LegacyStartupTask);
             return (bool)task.Enabled;
         } catch { return false; }
     }
