@@ -40,6 +40,8 @@ RECHERCHE (Ctrl+K, ou "Rechercher" a droite de la barre de menus)
   (driver = pilotes, casque = sortie audio) et les fautes de frappe.
 - Entree : GameBoost ouvre l'outil, ou va sur la page et fait clignoter
   l'option. Marche dans les 3 modeles.
+- Aussi dans le panneau rapide pres de l'horloge (clic droit sur l'icone) :
+  ecris dans le champ en haut, puis Entree ou "Chercher".
 - Outils ranges par famille de couleur dans NEXUS et ARENA : jeu, materiel,
   Windows, GameBoost.
 - NEXUS, page Optimisations : l'essentiel d'abord. Les 11 options avancees

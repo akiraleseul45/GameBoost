@@ -17194,6 +17194,18 @@ function Build-GBTrayPanel {
     [void](New-GBTrayBtn $p "Ouvrir" ($L + $IW - 86) ($y + 4) 86 30 $acc { Open-GBMainFromTray 'panneau' })
     $y += 48
 
+    # Recherche : ecris ton besoin, Entree (ou Chercher) ouvre les resultats
+    if (Test-Path function:Show-GBSearch) {
+        $sb = New-Object System.Windows.Forms.TextBox
+        $sb.BackColor = $cDeep; $sb.ForeColor = $cText; $sb.BorderStyle = "FixedSingle"; $sb.Font = $fontUI
+        $sb.Location = New-Object System.Drawing.Point((Get-TPS $L), (Get-TPS ($y + 2))); $sb.Size = New-Object System.Drawing.Size((Get-TPS ($IW - 92)), (Get-TPS 26))
+        $p.Controls.Add($sb); $Script:TraySearchBox = $sb
+        $sb.Add_KeyDown({ if ($_.KeyCode -eq 'Return') { $_.Handled = $true; $_.SuppressKeyPress = $true; Open-GBSearchFromTray } })
+        try { if ($tip) { $tip.SetToolTip($sb, "Ecris ce que tu cherches : mon jeu rame, pc trop chaud, micro, fps...") } } catch {}
+        [void](New-GBTrayBtn $p "Chercher" ($L + $IW - 86) $y 86 30 $acc { Open-GBSearchFromTray })
+        $y += 40
+    }
+
     # Etat du PC : 3 petites cases (utilisation en % + temperature en couleur), mises a jour toutes les 2 s
     $Script:TrayStats = @{}
     $gap = 6; $tw = [int](($IW - 2 * $gap) / 3)
@@ -19217,6 +19229,7 @@ function Set-GBNexusAdvanced([bool]$on, [switch]$NoSave) {
 function Show-GBSearchTarget($e) {
     if ($e.Run) { & $e.Run; return }
     if ($e.Kind -eq 'action') { [void](Invoke-GBAction $e.Id 'search'); return }
+    try { if (-not $form.Visible -or $form.WindowState -eq "Minimized") { Show-GBMainFront } } catch {}
     try { Show-GBPage $e.Page } catch {}
     $c = $e.Ctl; if (-not $c -or $c.IsDisposed) { return }
     try { if (-not $c.Visible -and $Script:NxAdv) { Set-GBNexusAdvanced $true } } catch {}
@@ -19282,9 +19295,21 @@ function Show-GBSearch([string]$Query = '') {
         elseif ($_.KeyCode -eq 'Return') { $_.Handled = $true; $_.SuppressKeyPress = $true; & $go }
         if (-not $tq.Focused -and $_.KeyCode -ne 'Return') { [void]$tq.Focus() }
     })
-    $d.Add_Shown({ & $fill; [void]$tq.Focus(); $tq.SelectAll() })
+    $d.Add_Shown({ if (-not $form.Visible) { $this.StartPosition = "Manual"; $wa = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea; $this.Location = New-Object System.Drawing.Point(($wa.X + [int](($wa.Width - $this.Width) / 2)), ($wa.Y + [int](($wa.Height - $this.Height) / 2))); $this.TopMost = $true; $this.Activate() }; & $fill; [void]$tq.Focus(); $tq.Select($tq.Text.Length, 0) })
     try { [void]$d.ShowDialog($form) } finally { $deb.Stop(); $deb.Dispose(); $d.Dispose() }
     if ($st.Pick) { try { Show-GBSearchTarget $st.Pick } catch { Log ("Recherche : " + $_.Exception.Message) } }
+}
+function Open-GBSearchFromTray {
+    $Script:TraySearchQuery = ''; try { if ($Script:TraySearchBox -and -not $Script:TraySearchBox.IsDisposed) { $Script:TraySearchQuery = [string]$Script:TraySearchBox.Text } } catch {}
+    if (-not $Script:TraySearchT) {
+        $Script:TraySearchT = New-Object System.Windows.Forms.Timer; $Script:TraySearchT.Interval = 70
+        $Script:TraySearchT.Add_Tick({
+            $this.Stop()
+            try { if ($Script:TrayPanel -and -not $Script:TrayPanel.IsDisposed) { $Script:TrayPanelBusy = $false; $Script:TrayPanel.Close() } } catch {}
+            try { Show-GBSearch $Script:TraySearchQuery } catch { try { Log ("Recherche : " + $_.Exception.Message) } catch {} }
+        })
+    }
+    $Script:TraySearchT.Stop(); $Script:TraySearchT.Start()
 }
 # Loupe a droite de la barre de menus (les 3 modeles ont cette barre)
 function Add-GBSearchMenuItem {
