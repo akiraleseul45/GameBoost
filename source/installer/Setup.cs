@@ -69,7 +69,7 @@ static class Setup {
         try {
             InitPaths();
             if (uninstall) return Uninstall(silent, cleanup);
-            if (silent) { Install(true, true); return 0; }
+            if (silent) { Install(true, true, null); return 0; }
             Application.Run(new InstallForm());
             return 0;
         } catch (Exception ex) {
@@ -100,7 +100,8 @@ static class Setup {
     }
 
     // Les etapes de l'installation. "step" recoit l'avancement (0 a 100) et le texte a afficher.
-    public static void Install(bool desktopShortcut, bool noPrompt, Action<int, string> step = null) {
+    // startup : true = GameBoost se lance avec Windows, false = non, null = ne rien changer (installation silencieuse)
+    public static void Install(bool desktopShortcut, bool noPrompt, bool? startup, Action<int, string> step = null) {
         if (step == null) step = delegate { };
         step(4, "Verification...");
         if (IsRunning()) throw new Exception("GameBoost est ouvert. Ferme-le (clic droit sur son icone pres de l'horloge > Quitter), puis relance l'installation.");
@@ -135,7 +136,10 @@ static class Setup {
         }
 
         step(92, noPrompt ? "Reglage du lancement sans question..." : "Derniers reglages...");
-        if (!TestMode) { if (noPrompt) RegisterTask(); else RemoveTask(TaskName); }
+        if (!TestMode) {
+            if (noPrompt) RegisterTask(); else RemoveTask(TaskName);
+            if (startup == true) RegisterStartupTask(); else if (startup == false) RemoveStartupTask();
+        }
         step(100, "Termine");
     }
     static void Shortcut(string lnk, string target, string description) {
@@ -171,6 +175,47 @@ static class Setup {
         dynamic folder;
         try { folder = svc.GetFolder(TaskFolder); } catch { folder = root.CreateFolder(TaskFolder.TrimStart('\\')); }
         folder.RegisterTask(TaskName, xml, 6 /* creer ou mettre a jour */, null, null, 3 /* session ouverte */, null);
+    }
+
+    // Tache "GameBoost" (racine) : la meme que l'option "Lancer GameBoost avec Windows" de l'application.
+    // A l'ouverture de session, GameBoost demarre reduit pres de l'horloge, avec les droits administrateur.
+    const string StartupTask = "GameBoost";
+    static void RegisterStartupTask() {
+        string sid = WindowsIdentity.GetCurrent().User.Value;
+        string xml =
+            "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n" +
+            "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n" +
+            "  <RegistrationInfo><Description>Lance GameBoost (reduit) a l'ouverture de session</Description></RegistrationInfo>\r\n" +
+            "  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + sid + "</UserId><Delay>PT20S</Delay></LogonTrigger></Triggers>\r\n" +
+            "  <Principals><Principal id=\"Author\"><UserId>" + sid + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\r\n" +
+            "  <Settings>\r\n" +
+            "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\r\n" +
+            "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\r\n" +
+            "    <AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>false</StartWhenAvailable>\r\n" +
+            "    <AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden>\r\n" +
+            "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>4</Priority>\r\n" +
+            "  </Settings>\r\n" +
+            "  <Actions Context=\"Author\"><Exec><Command>" + System.Security.SecurityElement.Escape(ExePath) + "</Command><Arguments>-Minimized</Arguments></Exec></Actions>\r\n" +
+            "</Task>";
+        dynamic svc = Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service"));
+        svc.Connect();
+        svc.GetFolder("\\").RegisterTask(StartupTask, xml, 6, null, null, 3, null);
+    }
+    static void RemoveStartupTask() {
+        try {
+            dynamic svc = Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service"));
+            svc.Connect();
+            svc.GetFolder("\\").DeleteTask(StartupTask, 0);
+        } catch { }
+    }
+    // GameBoost se lance-t-il deja avec Windows ? (case cochee d'avance lors d'une mise a jour)
+    public static bool HasStartupTask() {
+        try {
+            dynamic svc = Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service"));
+            svc.Connect();
+            dynamic task = svc.GetFolder("\\").GetTask(StartupTask);
+            return (bool)task.Enabled;
+        } catch { return false; }
     }
 
     static void RemoveTask(string name) {
@@ -313,6 +358,8 @@ static class Setup {
             CheckBox cTask = MakeCheck("Lancer GameBoost sans la question de Windows a chaque fois", true); cTask.SetBounds(24, 104, 470, 24); p1.Controls.Add(cTask);
             p1.Controls.Add(MakeLabel("GameBoost a besoin des droits administrateur pour regler Windows. Avec cette option, Windows ne redemande plus la confirmation a chaque lancement.",
                 43, 128, 452, 38, 8.5f, FontStyle.Regular, Muted));
+            CheckBox cStart = MakeCheck("Lancer GameBoost au demarrage de Windows", !TestMode && HasStartupTask()); cStart.SetBounds(24, 170, 470, 24); p1.Controls.Add(cStart);
+            p1.Controls.Add(MakeLabel("Il demarre reduit pres de l'horloge. Modifiable ensuite dans GameBoost.", 43, 194, 452, 20, 8.5f, FontStyle.Regular, Muted));
             Button ok = MakeButton("Installer", true); ok.SetBounds(274, 226, 110, 36); p1.Controls.Add(ok);
             Button cancel = MakeButton("Annuler", false); cancel.SetBounds(394, 226, 102, 36); p1.Controls.Add(cancel);
 
@@ -354,7 +401,7 @@ static class Setup {
                 busy = true; f.AcceptButton = null; f.CancelButton = null;
                 p1.Visible = false; p2.Visible = true; f.Cursor = Cursors.AppStarting; Application.DoEvents();
                 try {
-                    Install(cDesk.Checked, cTask.Checked, delegate(int percent, string text) {
+                    Install(cDesk.Checked, cTask.Checked, cStart.Checked, delegate(int percent, string text) {
                         // La barre avance en douceur jusqu'a l'etape en cours
                         status.Text = text;
                         double from = bar.Value, to = percent / 100.0;
@@ -366,7 +413,7 @@ static class Setup {
                     });
                     Thread.Sleep(350);
                     busy = false; f.Cursor = Cursors.Default;
-                    where.Text = "Tu le trouves dans le menu Demarrer" + (cDesk.Checked ? " et sur le Bureau" : "") + ".\r\n" +
+                    where.Text = "Tu le trouves dans le menu Demarrer" + (cDesk.Checked ? " et sur le Bureau" : "") + "." + (cStart.Checked ? " Il se lancera avec Windows." : "") + "\r\n" +
                                  "Pour le desinstaller : Parametres > Applications > Applications installees.";
                     p2.Visible = false; p3.Visible = true; f.AcceptButton = done; done.Focus();
                 } catch (Exception ex) {

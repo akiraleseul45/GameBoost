@@ -31,7 +31,7 @@ function Build-App([string]$out, [string[]]$extra) {
         "/resource:$third\PresentMon-x86.exe,PresentMon-x86.exe", "/resource:$third\LICENSE.txt,PresentMon-LICENCE.txt") + $extra + @("$L\Launcher.cs"))
 }
 function Build-Setup([string]$out, [string]$app, [string]$manifest, [string[]]$extra) {
-    Invoke-Csc (@('/nologo', '/nowarn:162', '/target:winexe', '/optimize+', "/out:$out", "/win32manifest:$manifest", "/win32icon:$L\GameBoost.ico",
+    Invoke-Csc (@('/nologo', '/nowarn:162,429', '/target:winexe', '/optimize+', "/out:$out", "/win32manifest:$manifest", "/win32icon:$L\GameBoost.ico",
         '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:Microsoft.CSharp.dll',
         "/resource:$app,GameBoost.exe", "/resource:$L\logo.png,logo.png",
         "/resource:$src\..\LISEZ-MOI.txt,LISEZ-MOI.txt", "/resource:$src\..\LICENSE,LICENCE.txt") + $extra + @("$I\Setup.cs"))
@@ -53,4 +53,5 @@ if ($Test) {
     Build-Setup (Join-Path $t 'SetupTest.exe') $app "$L\app.manifest" @('/define:TEST')
 }
 Get-ChildItem $OutDir -Filter *.exe | ForEach-Object { '{0,-22} {1,9:N0} octets  v{2}' -f $_.Name, $_.Length, $_.VersionInfo.FileVersion }
+
 

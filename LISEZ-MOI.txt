@@ -9,6 +9,9 @@ INSTALLATION (recommande)
    - raccourci dans le menu Demarrer (et sur le Bureau si tu le coches) ;
    - visible dans Parametres > Applications > Applications installees,
      avec son bouton Desinstaller.
+   Case "Lancer GameBoost au demarrage de Windows" : il demarre reduit
+   pres de l'horloge a chaque ouverture de session (modifiable ensuite dans
+   GameBoost).
 3. Option "Lancer GameBoost sans la question de Windows a chaque fois"
    (cochee par defaut) : GameBoost a besoin des droits administrateur pour
    regler Windows. Avec cette option, Windows ne redemande plus la
