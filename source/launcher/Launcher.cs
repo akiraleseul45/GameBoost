@@ -26,8 +26,8 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("GameBoost")]
 [assembly: AssemblyDescription("GameBoost - optimiseur de jeu pour Windows 10 / 11")]
 [assembly: AssemblyCompany("GameBoost (open source)")]
-[assembly: AssemblyVersion("3.1.0.0")]
-[assembly: AssemblyFileVersion("3.1.0.0")]
+[assembly: AssemblyVersion("3.2.0.0")]
+[assembly: AssemblyFileVersion("3.2.0.0")]
 
 static class Program {
     const string Title = "GameBoost";

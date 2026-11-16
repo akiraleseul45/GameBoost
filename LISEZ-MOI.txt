@@ -1,4 +1,4 @@
-GAMEBOOST 3.1 - Optimiseur de jeu (Windows 10 / 11)
+GAMEBOOST 3.2 - Optimiseur de jeu (Windows 10 / 11)
 ================================================
 
 INSTALLATION (recommande)
@@ -29,6 +29,41 @@ DESINSTALLER
   Desinstaller. Pour remettre Windows comme avant, clique d'abord sur
   TOUT RESTAURER dans GameBoost.
 
+RECHERCHE (Ctrl+K, ou "Rechercher" a droite de la barre de menus)
+- Ecris ce que tu cherches ou ton probleme avec tes mots : "mon jeu rame",
+  "pc trop chaud", "pas de son", "micro", "plus de fps", "internet lent".
+  GameBoost propose d'abord les bonnes options (ligne "Conseil", avec
+  l'explication), puis tout ce qui ressemble. Il comprend les mots proches
+  (driver = pilotes, casque = sortie audio) et les fautes de frappe.
+- Entree : GameBoost ouvre l'outil, ou va sur la page et fait clignoter
+  l'option. Marche dans les 3 modeles.
+- Outils ranges par famille de couleur dans NEXUS et ARENA : jeu, materiel,
+  Windows, GameBoost.
+- NEXUS, page Optimisations : l'essentiel d'abord. Les 11 options avancees
+  sont repliees (bouton "Afficher les options avancees", choix retenu).
+  Passe la souris sur une option : son explication s'affiche sous le titre.
+NOUVEAU EN 3.2 : CLAVIER ET SON (menu Outils, ou tuiles CLAVIER et SON)
+- CLAVIER > TOUCHES : change ce que fait une touche (A devient Q), echange
+  deux touches, ou desactive une touche. Marche dans tout Windows et en jeu,
+  tant que GameBoost est ouvert.
+- CLAVIER > MACROS : une touche joue une suite de touches ou ecrit un texte.
+  Trois modes : une fois, repete tant que la touche est maintenue, bascule.
+  Bouton "Enregistrer mes frappes" pour creer la macro en tapant.
+  ATTENTION : dans les jeux en ligne, les macros sont souvent interdites et
+  peuvent faire bannir un compte. Par defaut, GameBoost les coupe pendant le
+  boost (option a cocher pour les garder, a tes risques).
+- CLAVIER > DISPOSITION : passe tout le clavier en AZERTY, QWERTY ou QWERTZ.
+  Raccourci "Basculer AZERTY / QWERTY" a choisir dans Raccourcis clavier.
+- SON > APPLICATIONS : volume, sortie (casque, enceintes, ecran) et micro de
+  chaque application. Windows retient le choix pour l'application.
+- SON > PERIPHERIQUES : sortie et micro par defaut, volume, muet. Raccourcis
+  "Sortie audio suivante" et "Couper / remettre le micro", meme en jeu.
+- SON > EGALISEUR : 28 profils ranges par usage. Jeux (FPS, FPS competitif,
+  battle royale, MOBA, course, RPG, combat, horreur, sport, MMO), Musique
+  (jazz, rock, pop, classique, electro, hip-hop, metal...), Voix et films.
+  10 bandes reglables, profils perso, et un profil automatique pendant le
+  boost. Windows n'a pas d'egaliseur : il faut installer Equalizer APO
+  (logiciel libre et gratuit), GameBoost ecrit alors ses reglages dedans.
 NOUVEAU EN 3.1
 - GameBoost tourne sous son propre nom : plus aucun PowerShell dans la barre
   des taches ni dans le Gestionnaire des taches.

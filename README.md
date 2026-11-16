@@ -10,6 +10,10 @@ Optimiseur de jeu pour Windows 10 et 11. Un bouton **BOOST** met le PC en mode j
 |---|---|---|
 | ![Modèle NEXUS](docs/nexus.png) | ![Modèle ARENA](docs/arena.png) | ![Modèle PURE](docs/pure.png) |
 
+| Clavier : macros | Son : égaliseur |
+|---|---|
+| ![Fenêtre Clavier](docs/clavier.png) | ![Fenêtre Son](docs/son.png) |
+
 ## Ce que fait GameBoost
 
 - **Boost en un clic** : ferme les autres applications, met en pause les services inutiles, passe l'alimentation au maximum, donne la priorité au jeu. Tout est rétabli quand le boost s'arrête.
@@ -17,7 +21,10 @@ Optimiseur de jeu pour Windows 10 et 11. Un bouton **BOOST** met le PC en mode j
 - **Panneau rapide près de l'horloge** : boost, état du PC (CPU, GPU, RAM, températures), luminosité de chaque écran, éteindre un écran, limite de FPS.
 - **Mesures** : images par seconde en jeu (avec [PresentMon](https://github.com/GameTechDev/PresentMon)), températures, historique des parties.
 - **Écrans** : luminosité, fréquence, extinction d'un écran secondaire.
+- **Recherche** (Ctrl+K) : écris ton besoin avec tes mots (« mon jeu rame », « pc trop chaud », « pas de son ») et GameBoost propose les bonnes options. Elle comprend les mots proches et les fautes de frappe.
 - **Raccourcis clavier** personnalisables, y compris en jeu.
+- **Clavier** : changer ou désactiver une touche, macros (une fois, répétée, bascule), passage AZERTY / QWERTY. Les macros sont coupées pendant le boost par défaut, car beaucoup de jeux en ligne les interdisent.
+- **Son** : volume, sortie et micro de chaque application, périphériques par défaut, et un égaliseur avec 28 profils (jeux, musique, voix et films). L'égaliseur s'appuie sur [Equalizer APO](https://sourceforge.net/projects/equalizerapo/), à installer à part.
 - **Outils** : pilotes, nettoyage, réglages de Windows, désinstallation complète d'un programme.
 - **Retour en arrière** : une sauvegarde d'origine est faite au premier lancement, et le bouton **TOUT RESTAURER** remet Windows comme avant.
 

@@ -19,12 +19,12 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("GameBoost")]
 [assembly: AssemblyDescription("Installe ou desinstalle GameBoost")]
 [assembly: AssemblyCompany("GameBoost (open source)")]
-[assembly: AssemblyVersion("3.1.0.0")]
-[assembly: AssemblyFileVersion("3.1.0.0")]
+[assembly: AssemblyVersion("3.2.0.0")]
+[assembly: AssemblyFileVersion("3.2.0.0")]
 
 static class Setup {
     const string Title = "GameBoost";
-    const string Version = "3.1";
+    const string Version = "3.2";
     const string TaskFolder = "\\GameBoost";
     const string TaskName = "Lancer GameBoost";
     const string UninstallKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GameBoost";

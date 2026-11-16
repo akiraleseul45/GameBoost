@@ -1918,7 +1918,7 @@ $ConfigFile = Join-Path $AppDir "config.json"
 $StateFile  = Join-Path $AppDir "state.json"
 $BaselineFile = Join-Path $AppDir "sauvegarde_origine.json"
 $SessionsFile = Join-Path $AppDir "sessions.json"
-$AppVersion   = "3.1"
+$AppVersion   = "3.2"
 # PresentMon : version 2 (x64) sur les PC Intel/AMD 64 bits, version 1 (x86) sur Windows 32 bits et ARM
 $Script:PMPath = $null; $Script:PMv1 = $false
 $Script:NativeArch = $env:PROCESSOR_ARCHITEW6432
@@ -4791,6 +4791,7 @@ function Invoke-BoostCore([bool]$auto = $false) {
     $Script:BoostedPids.Clear()
     $Script:Boosted = $true
     $Script:AutoBoosted = $auto
+    try { if (Test-Path function:Invoke-GBExtBoost) { Invoke-GBExtBoost $true } } catch {}   # macros et egaliseur du jeu
     $Script:GpuPrefPids.Clear()
     Apply-GamePriority
     Apply-GpuPreference
@@ -4861,6 +4862,7 @@ function Invoke-RestoreCore {
     $Script:State = $null
     $Script:Boosted = $false
     $Script:AutoBoosted = $false
+    try { if (Test-Path function:Invoke-GBExtBoost) { Invoke-GBExtBoost $false } } catch {}
     $Script:MeasureOnlySession = $false
     $Script:BoostedPids.Clear()
     $btnBoost.Enabled = $true
@@ -17572,6 +17574,1733 @@ function Set-GBShellSize([int]$w, [int]$h) {
     $Script:Body.Size = New-Object System.Drawing.Size($sw, $sh)
     $form.ClientSize = New-Object System.Drawing.Size($sw, ($sh + $mh))
 }
+# ============================================================================
+# --- CLAVIER ET SON --------------------------------------------------------
+#  Clavier : touches remplacees, macros, disposition (AZERTY / QWERTY)
+#  Son     : volume, sortie et micro de chaque application, peripheriques, egaliseur
+#  Reglages dans %APPDATA%\GameBoost\clavier.json et son.json
+# ============================================================================
+$Script:GBKeysSrc = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+// Une etape de macro. Kind : 0 = touche (appui + relache), 1 = appui, 2 = relache, 3 = attente (Ms), 4 = texte
+public class GBMacroStep { public int Kind; public int Vk; public int Ms; public string Text; }
+// Mode : 0 = une fois, 1 = repete tant que la touche est maintenue, 2 = bascule (1er appui demarre, 2e arrete)
+public class GBMacro {
+    public string Name; public int Vk; public int Mods; public int Mode; public int GapMs = 40; public GBMacroStep[] Steps;
+    internal volatile bool Running; internal volatile bool StopFlag; internal volatile bool Held;
+}
+
+// Clavier : touches remplacees et macros, par un crochet clavier Windows sur un fil a part
+// (le fil de l'interface peut etre occupe sans ralentir la frappe).
+public static class GBKeys {
+    delegate IntPtr HookProc(int code, IntPtr w, IntPtr l);
+    [StructLayout(LayoutKind.Sequential)] struct KBD { public uint vk, scan, flags, time; public UIntPtr extra; }
+    [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public UIntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public UIntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)] struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public InputUnion u; }
+    [StructLayout(LayoutKind.Sequential)] struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam, lParam; public uint time; public int x, y; }
+
+    [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int id, HookProc proc, IntPtr mod, uint thread);
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr w, IntPtr l);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern int GetMessage(out MSG msg, IntPtr hwnd, uint min, uint max);
+    [DllImport("user32.dll")] static extern bool PostThreadMessage(uint thread, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint type);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr LoadKeyboardLayout(string klid, uint flags);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint thread);
+
+    // Marque de nos propres frappes : le crochet les laisse passer sans les retraiter
+    static readonly UIntPtr Tag = new UIntPtr(0x47424B31u);
+    static Thread th; static IntPtr hook = IntPtr.Zero; static uint tid; static HookProc proc;
+    static readonly ManualResetEvent ready = new ManualResetEvent(false);
+    static volatile Dictionary<int, int> remap = new Dictionary<int, int>();
+    static volatile Dictionary<int, GBMacro> macros = new Dictionary<int, GBMacro>();
+    static readonly Dictionary<int, GBMacro> heldBy = new Dictionary<int, GBMacro>();
+    static readonly HashSet<int> swallowed = new HashSet<int>();
+    static readonly List<int[]> rec = new List<int[]>();
+    public static volatile bool Paused;       // tout est suspendu (capture d'une touche dans GameBoost)
+    public static volatile bool MacrosOff;    // macros suspendues (pendant le boost si l'option le demande)
+    public static volatile bool Recording;    // enregistrement d'une macro : les frappes passent et sont notees
+    public static bool Active { get { return hook != IntPtr.Zero; } }
+    public static int LastError;
+
+    public static bool Start() {
+        if (Active) return true;
+        ready.Reset();
+        th = new Thread(Loop); th.IsBackground = true; th.Name = "GameBoost clavier"; th.Start();
+        ready.WaitOne(2000);
+        return Active;
+    }
+    public static void Stop() {
+        StopAllMacros();
+        if (!Active) return;
+        try { PostThreadMessage(tid, 0x0012, IntPtr.Zero, IntPtr.Zero); } catch { }
+        try { if (th != null) th.Join(1500); } catch { }
+    }
+    static void Loop() {
+        proc = Proc;
+        tid = GetCurrentThreadId();
+        hook = SetWindowsHookEx(13, proc, GetModuleHandle(null), 0);
+        if (hook == IntPtr.Zero) LastError = Marshal.GetLastWin32Error();
+        ready.Set();
+        if (hook == IntPtr.Zero) return;
+        MSG m;
+        while (GetMessage(out m, IntPtr.Zero, 0, 0) > 0) { }
+        UnhookWindowsHookEx(hook); hook = IntPtr.Zero;
+    }
+
+    // Nouvelle configuration, appliquee d'un coup. from[i] -> to[i] (0 = touche desactivee)
+    public static void Configure(int[] from, int[] to, GBMacro[] list) {
+        Dictionary<int, int> r = new Dictionary<int, int>();
+        if (from != null && to != null) for (int i = 0; i < from.Length && i < to.Length; i++) if (from[i] > 0 && from[i] != to[i]) r[from[i]] = to[i];
+        Dictionary<int, GBMacro> m = new Dictionary<int, GBMacro>();
+        if (list != null) foreach (GBMacro x in list) if (x != null && x.Vk > 0 && x.Steps != null && x.Steps.Length > 0) m[x.Vk | (x.Mods << 16)] = x;
+        StopAllMacros();
+        remap = r; macros = m;
+    }
+    public static void StopAllMacros() {
+        foreach (GBMacro x in macros.Values) { x.StopFlag = true; x.Held = false; }
+        lock (heldBy) heldBy.Clear();
+    }
+
+    public static void StartRecord() { lock (rec) rec.Clear(); Recording = true; }
+    // Chaque ligne : touche, 0 = appui / 1 = relache, heure en millisecondes
+    public static int[][] StopRecord() { Recording = false; lock (rec) return rec.ToArray(); }
+
+    static bool IsMod(int vk) { return vk == 0x10 || vk == 0x11 || vk == 0x12 || (vk >= 0xA0 && vk <= 0xA5) || vk == 0x5B || vk == 0x5C; }
+    static int Mods() {
+        int m = 0;
+        if (GetAsyncKeyState(0x11) < 0) m |= 1;
+        if (GetAsyncKeyState(0x12) < 0) m |= 2;
+        if (GetAsyncKeyState(0x10) < 0) m |= 4;
+        if (GetAsyncKeyState(0x5B) < 0 || GetAsyncKeyState(0x5C) < 0) m |= 8;
+        return m;
+    }
+
+    static IntPtr Proc(int code, IntPtr w, IntPtr l) {
+        try {
+            if (code == 0) {
+                KBD k = (KBD)Marshal.PtrToStructure(l, typeof(KBD));
+                if (k.extra != Tag) {
+                    int vk = (int)k.vk; int msg = (int)w;
+                    bool up = (msg == 0x0101 || msg == 0x0105);
+                    if (Recording) { lock (rec) if (rec.Count < 2000) rec.Add(new int[] { vk, up ? 1 : 0, Environment.TickCount }); }
+                    else if (!Paused) {
+                        // Relache d'une touche dont l'appui a ete avale : avalee aussi
+                        if (up) {
+                            GBMacro hm = null; bool was;
+                            lock (heldBy) { if (heldBy.TryGetValue(vk, out hm)) heldBy.Remove(vk); was = swallowed.Remove(vk); }
+                            if (hm != null) { hm.Held = false; return (IntPtr)1; }
+                            if (was && !remap.ContainsKey(vk)) return (IntPtr)1;
+                        }
+                        if (!MacrosOff && !up) {
+                            GBMacro m;
+                            int key = IsMod(vk) ? vk : (vk | (Mods() << 16));
+                            if (macros.TryGetValue(key, out m)) {
+                                bool repeat;
+                                lock (heldBy) { repeat = heldBy.ContainsKey(vk); heldBy[vk] = m; }
+                                if (!repeat) {
+                                    m.Held = true;
+                                    if (m.Mode == 2 && m.Running) m.StopFlag = true;
+                                    else if (!m.Running) { m.Running = true; m.StopFlag = false; GBMacro mm = m; ThreadPool.QueueUserWorkItem(delegate { Run(mm); }); }
+                                }
+                                return (IntPtr)1;
+                            }
+                        }
+                        int to;
+                        if (remap.TryGetValue(vk, out to)) {
+                            if (to > 0) Send(to, up);
+                            return (IntPtr)1;
+                        }
+                    }
+                }
+            }
+        } catch { }
+        return CallNextHookEx(hook, code, w, l);
+    }
+
+    static bool Extended(int vk) {
+        return (vk >= 0x21 && vk <= 0x28) || vk == 0x2D || vk == 0x2E || vk == 0x90 || vk == 0xA3 || vk == 0xA5 || vk == 0x6F || vk == 0x5B || vk == 0x5C || vk == 0x5D;
+    }
+    static void Send(int vk, bool up) {
+        INPUT[] a = new INPUT[1];
+        a[0].type = 1;
+        a[0].u.ki.wVk = (ushort)vk; a[0].u.ki.wScan = (ushort)MapVirtualKey((uint)vk, 0);
+        a[0].u.ki.dwFlags = (up ? 2u : 0u) | (Extended(vk) ? 1u : 0u);
+        a[0].u.ki.dwExtraInfo = Tag;
+        SendInput(1, a, Marshal.SizeOf(typeof(INPUT)));
+    }
+    static void SendChar(char c) {
+        INPUT[] a = new INPUT[2];
+        for (int i = 0; i < 2; i++) { a[i].type = 1; a[i].u.ki.wScan = c; a[i].u.ki.dwFlags = 4u | (i == 1 ? 2u : 0u); a[i].u.ki.dwExtraInfo = Tag; }
+        SendInput(2, a, Marshal.SizeOf(typeof(INPUT)));
+    }
+    static bool Wait(GBMacro m, int ms) {
+        int left = Math.Max(0, Math.Min(ms, 60000));
+        while (left > 0) { if (m.StopFlag) return false; int s = Math.Min(left, 10); Thread.Sleep(s); left -= s; }
+        return !m.StopFlag;
+    }
+    static void Run(GBMacro m) {
+        HashSet<int> down = new HashSet<int>();
+        try {
+            int loops = 0;
+            do {
+                foreach (GBMacroStep s in m.Steps) {
+                    if (m.StopFlag) break;
+                    switch (s.Kind) {
+                        case 0: Send(s.Vk, false); Thread.Sleep(12); Send(s.Vk, true); break;
+                        case 1: Send(s.Vk, false); down.Add(s.Vk); break;
+                        case 2: Send(s.Vk, true); down.Remove(s.Vk); break;
+                        case 3: Wait(m, s.Ms); break;
+                        case 4: if (s.Text != null) foreach (char c in s.Text) { if (m.StopFlag) break; SendChar(c); Thread.Sleep(4); } break;
+                    }
+                    if (s.Kind != 3) Thread.Sleep(8);
+                }
+                if (m.Mode == 0) break;
+                if (!Wait(m, Math.Max(20, m.GapMs))) break;
+                if (++loops > 100000) break;
+            } while (!m.StopFlag && !MacrosOff && !Paused && (m.Mode == 2 || m.Held));
+        } catch { }
+        finally {
+            foreach (int v in down) { try { Send(v, true); } catch { } }
+            m.Running = false; m.StopFlag = false;
+        }
+    }
+
+    // --- Disposition du clavier (AZERTY, QWERTY...) : klid = "0000040C" (francais), "00000409" (anglais US)...
+    public static bool SetLayout(string klid) {
+        IntPtr h = LoadKeyboardLayout(klid, 1);
+        if (h == IntPtr.Zero) return false;
+        IntPtr fg = GetForegroundWindow();
+        if (fg != IntPtr.Zero) PostMessage(fg, 0x0050, IntPtr.Zero, h);
+        PostMessage((IntPtr)0xFFFF, 0x0050, IntPtr.Zero, h);
+        return true;
+    }
+    // Langue de la disposition de la fenetre active (0x040C = francais, 0x0409 = anglais US...)
+    public static int CurrentLayout() {
+        uint pid; uint t = GetWindowThreadProcessId(GetForegroundWindow(), out pid);
+        return (int)((long)GetKeyboardLayout(t) & 0xFFFF);
+    }
+}
+'@
+$Script:GBAudioSrc = @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+public class GBAudioDevice { public string Id; public string Name; public bool IsDefault; public bool IsCapture; public int Volume; public bool Mute; }
+public class GBAudioSession { public int Pid; public string Name; public string DeviceId; public string DeviceName; public int Volume; public bool Mute; public bool IsSystem; public bool IsCapture; public bool Active; }
+
+// Son de Windows : peripheriques, volume de chaque application, sortie et micro par application.
+public static class GBAudio {
+    [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator { }
+    [ComImport, Guid("870af99c-171d-4f9e-af0d-e63df40c2bc9")] class PolicyConfigClient { }
+
+    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceEnumerator {
+        [PreserveSig] int EnumAudioEndpoints(int flow, int mask, out IMMDeviceCollection devices);
+        [PreserveSig] int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice device);
+        [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
+    }
+    [Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceCollection { [PreserveSig] int GetCount(out int n); [PreserveSig] int Item(int i, out IMMDevice device); }
+    [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDevice {
+        [PreserveSig] int Activate(ref Guid iid, int ctx, IntPtr activation, [MarshalAs(UnmanagedType.IUnknown)] out object o);
+        [PreserveSig] int OpenPropertyStore(int access, out IPropertyStore store);
+        [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+        [PreserveSig] int GetState(out int state);
+    }
+    [StructLayout(LayoutKind.Sequential)] struct PROPERTYKEY { public Guid fmtid; public int pid; }
+    [StructLayout(LayoutKind.Sequential)] struct PROPVARIANT { public ushort vt, r1, r2, r3; public IntPtr p1; public IntPtr p2; }
+    [Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPropertyStore {
+        [PreserveSig] int GetCount(out int n);
+        [PreserveSig] int GetAt(int i, out PROPERTYKEY key);
+        [PreserveSig] int GetValue(ref PROPERTYKEY key, out PROPVARIANT v);
+    }
+    [DllImport("ole32.dll")] static extern int PropVariantClear(ref PROPVARIANT v);
+
+    [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IAudioEndpointVolume {
+        [PreserveSig] int RegisterControlChangeNotify(IntPtr n);
+        [PreserveSig] int UnregisterControlChangeNotify(IntPtr n);
+        [PreserveSig] int GetChannelCount(out int n);
+        [PreserveSig] int SetMasterVolumeLevel(float db, ref Guid ctx);
+        [PreserveSig] int SetMasterVolumeLevelScalar(float level, ref Guid ctx);
+        [PreserveSig] int GetMasterVolumeLevel(out float db);
+        [PreserveSig] int GetMasterVolumeLevelScalar(out float level);
+        [PreserveSig] int SetChannelVolumeLevel(int ch, float db, ref Guid ctx);
+        [PreserveSig] int SetChannelVolumeLevelScalar(int ch, float level, ref Guid ctx);
+        [PreserveSig] int GetChannelVolumeLevel(int ch, out float db);
+        [PreserveSig] int GetChannelVolumeLevelScalar(int ch, out float level);
+        [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid ctx);
+        [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+    }
+    [Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IAudioSessionManager2 {
+        [PreserveSig] int GetAudioSessionControl(IntPtr guid, int flags, out IntPtr ctl);
+        [PreserveSig] int GetSimpleAudioVolume(IntPtr guid, int flags, out IntPtr vol);
+        [PreserveSig] int GetSessionEnumerator(out IAudioSessionEnumerator e);
+    }
+    [Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IAudioSessionEnumerator { [PreserveSig] int GetCount(out int n); [PreserveSig] int GetSession(int i, out IAudioSessionControl2 s); }
+    [Guid("bfb7ff88-7239-4fc9-8fa2-07c950be9c6d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IAudioSessionControl2 {
+        [PreserveSig] int GetState(out int state);
+        [PreserveSig] int GetDisplayName([MarshalAs(UnmanagedType.LPWStr)] out string name);
+        [PreserveSig] int SetDisplayName([MarshalAs(UnmanagedType.LPWStr)] string name, ref Guid ctx);
+        [PreserveSig] int GetIconPath([MarshalAs(UnmanagedType.LPWStr)] out string path);
+        [PreserveSig] int SetIconPath([MarshalAs(UnmanagedType.LPWStr)] string path, ref Guid ctx);
+        [PreserveSig] int GetGroupingParam(out Guid g);
+        [PreserveSig] int SetGroupingParam(ref Guid g, ref Guid ctx);
+        [PreserveSig] int RegisterAudioSessionNotification(IntPtr n);
+        [PreserveSig] int UnregisterAudioSessionNotification(IntPtr n);
+        [PreserveSig] int GetSessionIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string id);
+        [PreserveSig] int GetSessionInstanceIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string id);
+        [PreserveSig] int GetProcessId(out uint pid);
+        [PreserveSig] int IsSystemSoundsSession();
+        [PreserveSig] int SetDuckingPreference([MarshalAs(UnmanagedType.Bool)] bool optOut);
+    }
+    [Guid("87CE5498-68D6-44E5-9215-6DA47EF883D8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface ISimpleAudioVolume {
+        [PreserveSig] int SetMasterVolume(float level, ref Guid ctx);
+        [PreserveSig] int GetMasterVolume(out float level);
+        [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid ctx);
+        [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+    }
+    [Guid("f8679f50-850a-41cf-9c72-430f290290c8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPolicyConfig {
+        [PreserveSig] int GetMixFormat(); [PreserveSig] int GetDeviceFormat(); [PreserveSig] int ResetDeviceFormat(); [PreserveSig] int SetDeviceFormat();
+        [PreserveSig] int GetProcessingPeriod(); [PreserveSig] int SetProcessingPeriod(); [PreserveSig] int GetShareMode(); [PreserveSig] int SetShareMode();
+        [PreserveSig] int GetPropertyValue(); [PreserveSig] int SetPropertyValue();
+        [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string id, int role);
+    }
+
+    static readonly Guid IID_Volume = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+    static readonly Guid IID_SessMgr = new Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
+    static Guid Ctx = Guid.Empty;
+
+    static void Free(object o) { try { if (o != null) Marshal.ReleaseComObject(o); } catch { } }
+    static IMMDeviceEnumerator Enum() { return (IMMDeviceEnumerator)(new MMDeviceEnumerator()); }
+
+    static string FriendlyName(IMMDevice d) {
+        IPropertyStore ps = null;
+        try {
+            if (d.OpenPropertyStore(0, out ps) != 0 || ps == null) return "";
+            PROPERTYKEY k = new PROPERTYKEY(); k.fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"); k.pid = 14;
+            PROPVARIANT v;
+            if (ps.GetValue(ref k, out v) != 0) return "";
+            string s = (v.vt == 31 && v.p1 != IntPtr.Zero) ? Marshal.PtrToStringUni(v.p1) : "";
+            PropVariantClear(ref v);
+            return s ?? "";
+        } catch { return ""; } finally { Free(ps); }
+    }
+    static IAudioEndpointVolume VolumeOf(IMMDevice d) {
+        object o; Guid iid = IID_Volume;
+        if (d.Activate(ref iid, 23, IntPtr.Zero, out o) != 0) return null;
+        return o as IAudioEndpointVolume;
+    }
+
+    // Peripheriques branches et actifs. capture = false : sorties (casque, enceintes) ; true : micros
+    public static GBAudioDevice[] Devices(bool capture) {
+        List<GBAudioDevice> list = new List<GBAudioDevice>();
+        IMMDeviceEnumerator en = null; IMMDeviceCollection col = null;
+        try {
+            en = Enum(); int flow = capture ? 1 : 0;
+            string def = "";
+            IMMDevice dd; if (en.GetDefaultAudioEndpoint(flow, 0, out dd) == 0 && dd != null) { dd.GetId(out def); Free(dd); }
+            if (en.EnumAudioEndpoints(flow, 1, out col) != 0 || col == null) return list.ToArray();
+            int n; col.GetCount(out n);
+            for (int i = 0; i < n; i++) {
+                IMMDevice d; if (col.Item(i, out d) != 0 || d == null) continue;
+                try {
+                    GBAudioDevice x = new GBAudioDevice(); d.GetId(out x.Id); x.Name = FriendlyName(d); x.IsCapture = capture; x.IsDefault = (x.Id == def);
+                    IAudioEndpointVolume v = VolumeOf(d);
+                    if (v != null) { float f; if (v.GetMasterVolumeLevelScalar(out f) == 0) x.Volume = (int)Math.Round(f * 100); bool m; if (v.GetMute(out m) == 0) x.Mute = m; Free(v); }
+                    list.Add(x);
+                } finally { Free(d); }
+            }
+        } catch { } finally { Free(col); Free(en); }
+        return list.ToArray();
+    }
+
+    static IMMDevice Find(IMMDeviceEnumerator en, string id, bool capture) {
+        IMMDevice d = null;
+        if (string.IsNullOrEmpty(id)) { en.GetDefaultAudioEndpoint(capture ? 1 : 0, 0, out d); return d; }
+        en.GetDevice(id, out d); return d;
+    }
+    // Volume general d'un peripherique (id vide = celui par defaut). level : 0 a 100, -1 = ne pas changer ; mute : 0 / 1, -1 = ne pas changer, 2 = inverser
+    public static bool SetDevice(string id, bool capture, int level, int mute) {
+        IMMDeviceEnumerator en = null; IMMDevice d = null; IAudioEndpointVolume v = null;
+        try {
+            en = Enum(); d = Find(en, id, capture); if (d == null) return false;
+            v = VolumeOf(d); if (v == null) return false;
+            if (level >= 0) v.SetMasterVolumeLevelScalar(Math.Min(100, level) / 100f, ref Ctx);
+            if (mute == 2) { bool m; v.GetMute(out m); v.SetMute(!m, ref Ctx); } else if (mute >= 0) v.SetMute(mute == 1, ref Ctx);
+            return true;
+        } catch { return false; } finally { Free(v); Free(d); Free(en); }
+    }
+    public static bool GetMute(string id, bool capture) {
+        IMMDeviceEnumerator en = null; IMMDevice d = null; IAudioEndpointVolume v = null;
+        try { en = Enum(); d = Find(en, id, capture); if (d == null) return false; v = VolumeOf(d); bool m = false; if (v != null) v.GetMute(out m); return m; }
+        catch { return false; } finally { Free(v); Free(d); Free(en); }
+    }
+    // Peripherique par defaut de Windows (son general, multimedia et communications)
+    public static bool SetDefault(string id) {
+        object o = null;
+        try {
+            o = new PolicyConfigClient(); IPolicyConfig pc = (IPolicyConfig)o;
+            int hr = 0; for (int role = 0; role < 3; role++) { int r = pc.SetDefaultEndpoint(id, role); if (r != 0) hr = r; }
+            return hr == 0;
+        } catch { return false; } finally { Free(o); }
+    }
+
+    static string ProcName(int pid) {
+        try { using (Process p = Process.GetProcessById(pid)) return p.ProcessName; } catch { return ""; }
+    }
+    // Applications qui jouent du son (capture = false) ou qui utilisent un micro (capture = true)
+    public static GBAudioSession[] Sessions(bool capture) {
+        List<GBAudioSession> list = new List<GBAudioSession>();
+        IMMDeviceEnumerator en = null; IMMDeviceCollection col = null;
+        try {
+            en = Enum();
+            if (en.EnumAudioEndpoints(capture ? 1 : 0, 1, out col) != 0 || col == null) return list.ToArray();
+            int n; col.GetCount(out n);
+            for (int i = 0; i < n; i++) {
+                IMMDevice d; if (col.Item(i, out d) != 0 || d == null) continue;
+                IAudioSessionManager2 mgr = null; IAudioSessionEnumerator se = null;
+                try {
+                    string did; d.GetId(out did); string dname = FriendlyName(d);
+                    object o; Guid iid = IID_SessMgr;
+                    if (d.Activate(ref iid, 23, IntPtr.Zero, out o) != 0) continue;
+                    mgr = o as IAudioSessionManager2; if (mgr == null) continue;
+                    if (mgr.GetSessionEnumerator(out se) != 0 || se == null) continue;
+                    int c; se.GetCount(out c);
+                    for (int j = 0; j < c; j++) {
+                        IAudioSessionControl2 s; if (se.GetSession(j, out s) != 0 || s == null) continue;
+                        try {
+                            int st; s.GetState(out st); if (st == 2) continue;   // session terminee
+                            GBAudioSession x = new GBAudioSession(); x.DeviceId = did; x.DeviceName = dname; x.IsCapture = capture; x.Active = (st == 1);
+                            uint pid; s.GetProcessId(out pid); x.Pid = (int)pid;
+                            x.IsSystem = (s.IsSystemSoundsSession() == 0);
+                            x.Name = x.IsSystem ? "Sons de Windows" : ProcName(x.Pid);
+                            if (!x.IsSystem && x.Name.Length == 0) continue;
+                            ISimpleAudioVolume v = s as ISimpleAudioVolume;
+                            if (v != null) { float f; if (v.GetMasterVolume(out f) == 0) x.Volume = (int)Math.Round(f * 100); bool m; if (v.GetMute(out m) == 0) x.Mute = m; }
+                            list.Add(x);
+                        } finally { Free(s); }
+                    }
+                } catch { } finally { Free(se); Free(mgr); Free(d); }
+            }
+        } catch { } finally { Free(col); Free(en); }
+        return list.ToArray();
+    }
+    // Volume d'une application (toutes ses sessions, sur toutes les sorties). level -1 = ne pas changer ; mute -1 = ne pas changer
+    public static int SetApp(int pid, int level, int mute) {
+        int done = 0;
+        IMMDeviceEnumerator en = null; IMMDeviceCollection col = null;
+        try {
+            en = Enum();
+            if (en.EnumAudioEndpoints(0, 1, out col) != 0 || col == null) return 0;
+            int n; col.GetCount(out n);
+            for (int i = 0; i < n; i++) {
+                IMMDevice d; if (col.Item(i, out d) != 0 || d == null) continue;
+                IAudioSessionManager2 mgr = null; IAudioSessionEnumerator se = null;
+                try {
+                    object o; Guid iid = IID_SessMgr;
+                    if (d.Activate(ref iid, 23, IntPtr.Zero, out o) != 0) continue;
+                    mgr = o as IAudioSessionManager2; if (mgr == null || mgr.GetSessionEnumerator(out se) != 0 || se == null) continue;
+                    int c; se.GetCount(out c);
+                    for (int j = 0; j < c; j++) {
+                        IAudioSessionControl2 s; if (se.GetSession(j, out s) != 0 || s == null) continue;
+                        try {
+                            uint p; s.GetProcessId(out p); if ((int)p != pid) continue;
+                            ISimpleAudioVolume v = s as ISimpleAudioVolume; if (v == null) continue;
+                            if (level >= 0) v.SetMasterVolume(Math.Min(100, level) / 100f, ref Ctx);
+                            if (mute >= 0) v.SetMute(mute == 1, ref Ctx);
+                            done++;
+                        } finally { Free(s); }
+                    }
+                } catch { } finally { Free(se); Free(mgr); Free(d); }
+            }
+        } catch { } finally { Free(col); Free(en); }
+        return done;
+    }
+
+    // --- Sortie et micro par application (reglage "Volume des applications et preferences des peripheriques" de Windows 10 1803+ / 11)
+    [DllImport("combase.dll")] static extern int RoGetActivationFactory(IntPtr classId, ref Guid iid, out IntPtr factory);
+    [DllImport("combase.dll", CharSet = CharSet.Unicode)] static extern int WindowsCreateString(string s, int len, out IntPtr h);
+    [DllImport("combase.dll")] static extern int WindowsDeleteString(IntPtr h);
+    [DllImport("combase.dll")] static extern IntPtr WindowsGetStringRawBuffer(IntPtr h, out uint len);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int SetEp(IntPtr self, uint pid, int flow, int role, IntPtr deviceId);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int GetEp(IntPtr self, uint pid, int flow, int role, out IntPtr deviceId);
+    const string RenderSuffix = "#{e6327cad-dcec-4949-ae8a-991e976a79d2}", CaptureSuffix = "#{2eef81be-33fa-4800-9670-1cd474972c3f}", Prefix = @"\\?\SWD#MMDEVAPI#";
+    public static int LastHr;
+
+    static IntPtr Factory() {
+        IntPtr cls; if (WindowsCreateString("Windows.Media.Internal.AudioPolicyConfig", 40, out cls) != 0) return IntPtr.Zero;
+        try {
+            foreach (string g in new string[] { "ab3d4648-e242-459f-b02f-541c70306324", "2a59116d-6c4f-45e0-a74f-707e3fef9258" }) {
+                Guid iid = new Guid(g); IntPtr f;
+                if (RoGetActivationFactory(cls, ref iid, out f) == 0 && f != IntPtr.Zero) return f;
+            }
+        } catch { } finally { WindowsDeleteString(cls); }
+        return IntPtr.Zero;
+    }
+    static T Slot<T>(IntPtr self, int index) where T : class {
+        IntPtr vt = Marshal.ReadIntPtr(self);
+        return Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(vt, index * IntPtr.Size), typeof(T)) as T;
+    }
+    public static bool AppRoutingAvailable() { IntPtr f = Factory(); if (f == IntPtr.Zero) return false; Marshal.Release(f); return true; }
+    // Peripherique choisi pour une application ("" = celui par defaut de Windows)
+    public static string GetAppDevice(int pid, bool capture) {
+        IntPtr f = Factory(); if (f == IntPtr.Zero) return "";
+        try {
+            IntPtr h; LastHr = Slot<GetEp>(f, 26)(f, (uint)pid, capture ? 1 : 0, 1, out h);
+            if (LastHr != 0 || h == IntPtr.Zero) return "";
+            uint len; string s = Marshal.PtrToStringUni(WindowsGetStringRawBuffer(h, out len), (int)len); WindowsDeleteString(h);
+            if (string.IsNullOrEmpty(s)) return "";
+            int a = s.IndexOf("MMDEVAPI#", StringComparison.OrdinalIgnoreCase); if (a < 0) return s;
+            a += 9; int b = s.IndexOf('#', a); return b > a ? s.Substring(a, b - a) : s.Substring(a);
+        } catch { return ""; } finally { Marshal.Release(f); }
+    }
+    // deviceId vide = revenir au peripherique par defaut de Windows
+    public static bool SetAppDevice(int pid, bool capture, string deviceId) {
+        IntPtr f = Factory(); if (f == IntPtr.Zero) return false;
+        IntPtr h = IntPtr.Zero;
+        try {
+            if (!string.IsNullOrEmpty(deviceId)) {
+                string full = Prefix + deviceId + (capture ? CaptureSuffix : RenderSuffix);
+                if (WindowsCreateString(full, full.Length, out h) != 0) return false;
+            }
+            SetEp set = Slot<SetEp>(f, 25); int flow = capture ? 1 : 0;
+            int hr = set(f, (uint)pid, flow, 1, h);
+            int hr2 = set(f, (uint)pid, flow, 0, h);
+            LastHr = hr != 0 ? hr : hr2;
+            return hr == 0 && hr2 == 0;
+        } catch { return false; } finally { if (h != IntPtr.Zero) WindowsDeleteString(h); Marshal.Release(f); }
+    }
+}
+'@
+
+# Objets lus dans un fichier JSON -> tables et listes modifiables
+function ConvertTo-GBPlain($o) {
+    if ($null -eq $o) { return $null }
+    if ($o -is [string] -or $o -is [ValueType]) { return $o }
+    if ($o -is [System.Collections.IDictionary]) { $h = @{}; foreach ($k in @($o.Keys)) { $h[[string]$k] = ConvertTo-GBPlain $o[$k] }; return $h }
+    if ($o -is [System.Collections.IEnumerable]) { $l = New-Object System.Collections.ArrayList; foreach ($x in $o) { [void]$l.Add((ConvertTo-GBPlain $x)) }; return , $l }
+    $h = @{}; foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = ConvertTo-GBPlain $p.Value }
+    return $h
+}
+function Read-GBJsonFile([string]$path, $default) {
+    try {
+        if (Test-Path -LiteralPath $path) {
+            $o = ConvertTo-GBPlain ((Get-Content -LiteralPath $path -Raw -Encoding UTF8) | ConvertFrom-Json)
+            if ($o -is [hashtable]) { foreach ($k in @($default.Keys)) { if (-not $o.ContainsKey($k) -or $null -eq $o[$k]) { $o[$k] = $default[$k] } }; return $o }
+        }
+    } catch { try { Log ("Reglages illisibles (" + (Split-Path -Leaf $path) + ") : valeurs par defaut") } catch {} }
+    return $default
+}
+function ConvertTo-GBList($v) {
+    $l = New-Object System.Collections.ArrayList
+    if ($null -ne $v) { foreach ($x in @($v)) { if ($null -ne $x) { [void]$l.Add($x) } } }
+    return , $l
+}
+
+$Script:KbFile = Join-Path $AppDir 'clavier.json'
+$Script:SndFile = Join-Path $AppDir 'son.json'
+$Script:Kb = Read-GBJsonFile $Script:KbFile @{ Enabled = $true; MacrosInBoost = $false; Remaps = @(); Macros = @() }
+$Script:Kb.Remaps = ConvertTo-GBList $Script:Kb.Remaps
+$Script:Kb.Macros = ConvertTo-GBList $Script:Kb.Macros
+$Script:Snd = Read-GBJsonFile $Script:SndFile @{ EqActive = ''; EqBands = @(); EqBoost = ''; EqIdle = ''; EqCustom = @() }
+$Script:Snd.EqCustom = ConvertTo-GBList $Script:Snd.EqCustom
+function Save-GBKb { try { $Script:Kb | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Script:KbFile -Encoding UTF8 } catch { Log ("Clavier : reglages non enregistres (" + $_.Exception.Message + ")") } }
+function Save-GBSnd { try { $Script:Snd | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Script:SndFile -Encoding UTF8 } catch { Log ("Son : reglages non enregistres (" + $_.Exception.Message + ")") } }
+
+function Initialize-GBKeys {
+    if ('GBKeys' -as [type]) { return $true }
+    try { return [bool](Add-GBCompiled 'GBKeys' $Script:GBKeysSrc $null 'GBKeys') } catch { return $false }
+}
+function Initialize-GBAudio {
+    if ('GBAudio' -as [type]) { return $true }
+    try { return [bool](Add-GBCompiled 'GBAudio' $Script:GBAudioSrc $null 'GBAudio') } catch { return $false }
+}
+
+# ---------------------------------------------------------------- noms des touches
+$Script:VkNames = @{
+    8 = 'Retour'; 9 = 'Tab'; 13 = 'Entree'; 16 = 'Maj'; 17 = 'Ctrl'; 18 = 'Alt'; 19 = 'Pause'; 20 = 'VerrMaj'; 27 = 'Echap'; 32 = 'Espace'
+    33 = 'PagePrec'; 34 = 'PageSuiv'; 35 = 'Fin'; 36 = 'Debut'; 37 = 'Gauche'; 38 = 'Haut'; 39 = 'Droite'; 40 = 'Bas'; 44 = 'ImprEcran'; 45 = 'Inser'; 46 = 'Suppr'
+    91 = 'Win'; 92 = 'WinDroite'; 93 = 'Menu'; 106 = 'NumFois'; 107 = 'NumPlus'; 109 = 'NumMoins'; 110 = 'NumPoint'; 111 = 'NumDivise'; 144 = 'VerrNum'; 145 = 'ArretDefil'
+    160 = 'MajGauche'; 161 = 'MajDroite'; 162 = 'CtrlGauche'; 163 = 'CtrlDroite'; 164 = 'AltGauche'; 165 = 'AltGr'
+    173 = 'SonMuet'; 174 = 'SonMoins'; 175 = 'SonPlus'; 176 = 'PisteSuivante'; 177 = 'PistePrecedente'; 178 = 'StopMedia'; 179 = 'LecturePause'
+}
+function Get-GBVkName([int]$vk) {
+    if ($vk -le 0) { return '' }
+    if (($vk -ge 48 -and $vk -le 57) -or ($vk -ge 65 -and $vk -le 90)) { return [string][char]$vk }
+    if ($vk -ge 96 -and $vk -le 105) { return 'Num' + ($vk - 96) }
+    if ($vk -ge 112 -and $vk -le 135) { return 'F' + ($vk - 111) }
+    if ($Script:VkNames.ContainsKey($vk)) { return $Script:VkNames[$vk] }
+    return 'Touche' + $vk
+}
+function Get-GBVkFromName([string]$name) {
+    $n = ([string]$name).Trim(); if (-not $n) { return 0 }
+    if (-not $Script:VkByName) {
+        $Script:VkByName = @{}
+        for ($v = 1; $v -le 254; $v++) { $k = (Get-GBVkName $v).ToLower(); if (-not $Script:VkByName.ContainsKey($k)) { $Script:VkByName[$k] = $v } }
+        foreach ($al in @(@('shift', 16), @('control', 17), @('entrer', 13), @('enter', 13), @('esc', 27), @('escape', 27), @('space', 32), @('del', 46), @('supprimer', 46), @('backspace', 8))) { $Script:VkByName[$al[0]] = $al[1] }
+    }
+    $k = $n.ToLower()
+    if ($Script:VkByName.ContainsKey($k)) { return [int]$Script:VkByName[$k] }
+    return 0
+}
+function Get-GBKeyComboText([int]$vk, [int]$mods) {
+    $t = @()
+    if ($mods -band 1) { $t += 'Ctrl' }; if ($mods -band 2) { $t += 'Alt' }; if ($mods -band 4) { $t += 'Maj' }; if ($mods -band 8) { $t += 'Win' }
+    $t += (Get-GBVkName $vk)
+    return ($t -join '+')
+}
+# Maj, Ctrl et Alt : le clavier envoie en realite la touche de gauche ou de droite
+function Expand-GBVk([int]$vk) {
+    switch ($vk) { 16 { return @(160, 161) } 17 { return @(162, 163) } 18 { return @(164, 165) } default { return @($vk) } }
+}
+
+# ---------------------------------------------------------------- macros : texte -> etapes
+# Une ligne par action :  touche A | touche Ctrl+C | appui Maj | relache Maj | attendre 50 | texte Bonjour
+function ConvertTo-GBMacroSteps([string]$text) {
+    $steps = New-Object System.Collections.ArrayList; $err = ''; $n = 0
+    foreach ($raw in (([string]$text) -split "`r?`n")) {
+        $n++; $line = $raw.Trim()
+        if (-not $line -or $line.StartsWith('#')) { continue }
+        $i = $line.IndexOf(' '); $cmd = $line; $arg = ''
+        if ($i -gt 0) { $cmd = $line.Substring(0, $i); $arg = $line.Substring($i + 1) }
+        $cmd = $cmd.ToLower()
+        if ($cmd -eq 'texte') {
+            if ($arg.Length -gt 2000) { $arg = $arg.Substring(0, 2000) }
+            [void]$steps.Add(@{ Kind = 4; Vk = 0; Ms = 0; Text = $arg })
+        } elseif ($cmd -eq 'attendre') {
+            $ms = 0
+            if (-not [int]::TryParse($arg.Trim(), [ref]$ms) -or $ms -lt 0) { $err = "Ligne " + $n + " : ecris un nombre de millisecondes apres 'attendre' (ex : attendre 50)."; break }
+            [void]$steps.Add(@{ Kind = 3; Vk = 0; Ms = [math]::Min($ms, 60000); Text = '' })
+        } elseif (@('touche', 'appui', 'relache') -contains $cmd) {
+            $names = @($arg.Trim()); if ((Get-GBVkFromName $arg) -eq 0) { $names = @($arg.Trim() -split '\+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+            $vks = @(); foreach ($nm in $names) { $v = Get-GBVkFromName $nm; if ($v -eq 0) { $err = "Ligne " + $n + " : touche inconnue '" + $nm + "'."; break }; $vks += $v }
+            if ($err) { break }
+            if ($vks.Count -eq 0) { $err = "Ligne " + $n + " : il manque le nom de la touche."; break }
+            if ($cmd -eq 'touche') {
+                for ($j = 0; $j -lt $vks.Count - 1; $j++) { [void]$steps.Add(@{ Kind = 1; Vk = $vks[$j]; Ms = 0; Text = '' }) }
+                [void]$steps.Add(@{ Kind = 0; Vk = $vks[-1]; Ms = 0; Text = '' })
+                for ($j = $vks.Count - 2; $j -ge 0; $j--) { [void]$steps.Add(@{ Kind = 2; Vk = $vks[$j]; Ms = 0; Text = '' }) }
+            } else {
+                $kind = 1; if ($cmd -eq 'relache') { $kind = 2 }
+                foreach ($v in $vks) { [void]$steps.Add(@{ Kind = $kind; Vk = $v; Ms = 0; Text = '' }) }
+            }
+        } else { $err = "Ligne " + $n + " : commande inconnue '" + $cmd + "'. Commandes : touche, appui, relache, attendre, texte."; break }
+        if ($steps.Count -gt 400) { $err = "Macro trop longue (400 actions au maximum)."; break }
+    }
+    return @{ Steps = $steps; Error = $err }
+}
+# Frappes enregistrees (touche, 0 appui / 1 relache, heure) -> texte de macro
+function ConvertFrom-GBKeyRecord($events) {
+    $lines = New-Object System.Collections.ArrayList
+    $ev = @($events); $last = 0
+    for ($i = 0; $i -lt $ev.Count; $i++) {
+        $e = $ev[$i]; $vk = [int]$e[0]; $up = ([int]$e[1] -eq 1); $t = [int]$e[2]
+        # repetition automatique d'une touche maintenue : ignoree
+        if (-not $up) { $dup = $false; for ($j = $i - 1; $j -ge 0; $j--) { if ([int]$ev[$j][0] -eq $vk) { $dup = ([int]$ev[$j][1] -eq 0); break } }; if ($dup) { continue } }
+        if ($last -gt 0) { $gap = $t - $last; if ($gap -ge 20) { [void]$lines.Add('attendre ' + [math]::Min(5000, [int]([math]::Round($gap / 10.0) * 10))) } }
+        $last = $t
+        $name = Get-GBVkName $vk
+        # appui suivi de sa relache (repetitions automatiques sautees) en moins de 250 ms : une simple "touche"
+        $j = $i + 1; while (-not $up -and $j -lt $ev.Count -and [int]$ev[$j][0] -eq $vk -and [int]$ev[$j][1] -eq 0) { $j++ }
+        if (-not $up -and $j -lt $ev.Count -and [int]$ev[$j][0] -eq $vk -and [int]$ev[$j][1] -eq 1 -and ([int]$ev[$j][2] - $t) -lt 250) { [void]$lines.Add('touche ' + $name); $last = [int]$ev[$j][2]; $i = $j }
+        elseif ($up) { [void]$lines.Add('relache ' + $name) } else { [void]$lines.Add('appui ' + $name) }
+    }
+    return ($lines -join "`r`n")
+}
+
+# ---------------------------------------------------------------- moteur clavier
+function Update-GBKeysEngine {
+    $kb = $Script:Kb
+    $from = New-Object System.Collections.ArrayList; $to = New-Object System.Collections.ArrayList; $defs = New-Object System.Collections.ArrayList
+    if ($kb.Enabled) {
+        foreach ($r in @($kb.Remaps)) {
+            if (-not $r.On -or [int]$r.From -le 0) { continue }
+            foreach ($v in (Expand-GBVk ([int]$r.From))) { [void]$from.Add([int]$v); [void]$to.Add([int]$r.To) }
+        }
+        foreach ($m in @($kb.Macros)) {
+            if (-not $m.On -or [int]$m.Vk -le 0) { continue }
+            $p = ConvertTo-GBMacroSteps ([string]$m.Script)
+            if ($p.Error -or $p.Steps.Count -eq 0) { continue }
+            [void]$defs.Add(@{ M = $m; Steps = $p.Steps })
+        }
+    }
+    if ($from.Count -eq 0 -and $defs.Count -eq 0) {
+        if ('GBKeys' -as [type]) { try { [GBKeys]::Configure($null, $null, $null); [GBKeys]::Stop() } catch {} }
+        return $true
+    }
+    if (-not (Initialize-GBKeys)) { Log "Clavier : le composant n'a pas pu etre charge (bloque par l'antivirus ?). Touches et macros inactives."; return $false }
+    $list = New-Object System.Collections.ArrayList
+    foreach ($d in $defs) {
+        $steps = @(foreach ($s in $d.Steps) { $x = New-Object GBMacroStep; $x.Kind = [int]$s.Kind; $x.Vk = [int]$s.Vk; $x.Ms = [int]$s.Ms; $x.Text = [string]$s.Text; $x })
+        foreach ($v in (Expand-GBVk ([int]$d.M.Vk))) {
+            $g = New-Object GBMacro; $g.Name = [string]$d.M.Name; $g.Vk = [int]$v; $g.Mods = [int]$d.M.Mods; $g.Mode = [int]$d.M.Mode
+            $g.GapMs = [math]::Max(20, [int]$d.M.Gap); $g.Steps = [GBMacroStep[]]$steps
+            [void]$list.Add($g)
+        }
+    }
+    try {
+        [GBKeys]::Configure([int[]]@($from), [int[]]@($to), [GBMacro[]]@($list))
+        [GBKeys]::MacrosOff = ([bool]$Script:Boosted -and -not [bool]$kb.MacrosInBoost)
+        if (-not [GBKeys]::Start()) { Log ("Clavier : Windows a refuse l'ecoute du clavier (code " + [GBKeys]::LastError + "). Touches et macros inactives."); return $false }
+    } catch { Log ("Clavier : " + $_.Exception.Message); return $false }
+    return $true
+}
+function Get-GBKeysSummary {
+    $kb = $Script:Kb
+    $r = @($kb.Remaps | Where-Object { $_.On }).Count; $m = @($kb.Macros | Where-Object { $_.On }).Count
+    if (-not $kb.Enabled) { return "coupe" }
+    if ($r + $m -eq 0) { return "aucune touche changee" }
+    return ($r.ToString() + " touche(s), " + $m + " macro(s)")
+}
+
+# ---------------------------------------------------------------- disposition du clavier
+$Script:KbLayouts = @(
+    @{ Id = '0000040C'; Lang = 0x040C; Name = 'AZERTY (francais)' }, @{ Id = '00000409'; Lang = 0x0409; Name = 'QWERTY (anglais US)' },
+    @{ Id = '00000809'; Lang = 0x0809; Name = 'QWERTY (anglais UK)' }, @{ Id = '00000407'; Lang = 0x0407; Name = 'QWERTZ (allemand)' },
+    @{ Id = '0000080C'; Lang = 0x080C; Name = 'AZERTY (belge)' }, @{ Id = '0000040A'; Lang = 0x040A; Name = 'QWERTY (espagnol)' })
+function Get-GBKeyLayoutName {
+    if (-not (Initialize-GBKeys)) { return 'inconnue' }
+    $l = 0; try { $l = [GBKeys]::CurrentLayout() } catch {}
+    foreach ($x in $Script:KbLayouts) { if ($x.Lang -eq $l) { return $x.Name } }
+    try { return ([System.Globalization.CultureInfo]::GetCultureInfo($l)).DisplayName } catch { return ('0x{0:X4}' -f $l) }
+}
+function Set-GBKeyLayout([string]$klid) {
+    if (-not (Initialize-GBKeys)) { Log "Clavier : composant indisponible, disposition inchangee."; return $false }
+    $name = $klid; foreach ($x in $Script:KbLayouts) { if ($x.Id -eq $klid) { $name = $x.Name } }
+    $ok = $false; try { $ok = [GBKeys]::SetLayout($klid) } catch {}
+    if ($ok) { Log ("Clavier : disposition " + $name) } else { Log ("Clavier : Windows n'a pas pu charger la disposition " + $name) }
+    return $ok
+}
+function Switch-GBKeyLayout {
+    $l = 0; if (Initialize-GBKeys) { try { $l = [GBKeys]::CurrentLayout() } catch {} }
+    if ($l -eq 0x040C -or $l -eq 0x080C) { [void](Set-GBKeyLayout '00000409') } else { [void](Set-GBKeyLayout '0000040C') }
+}
+
+# ---------------------------------------------------------------- egaliseur (applique par Equalizer APO, logiciel libre)
+$Script:EqBands = @(31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
+$Script:EqBandNames = @('31 Hz', '62 Hz', '125 Hz', '250 Hz', '500 Hz', '1 kHz', '2 kHz', '4 kHz', '8 kHz', '16 kHz')
+$Script:EqPresets = @(
+    @{ Id = 'plat';       S = 'General';        N = 'Neutre (aucun changement)';         B = @(0, 0, 0, 0, 0, 0, 0, 0, 0, 0) },
+    @{ Id = 'fps';        S = 'Jeux';           N = 'FPS : pas et tirs';                 B = @(-4, -3, -2, -1, 0, 1, 3, 5, 4, 2) },
+    @{ Id = 'fpscomp';    S = 'Jeux';           N = 'FPS competitif : pas au maximum';   B = @(-8, -6, -4, -2, 0, 2, 5, 7, 5, 2) },
+    @{ Id = 'br';         S = 'Jeux';           N = 'Battle royale';                     B = @(-3, -2, -1, 0, 0, 1, 3, 4, 4, 2) },
+    @{ Id = 'moba';       S = 'Jeux';           N = 'MOBA : sorts et alertes';           B = @(0, 0, 0, -1, 0, 2, 3, 3, 2, 1) },
+    @{ Id = 'course';     S = 'Jeux';           N = 'Course : moteur et route';          B = @(4, 4, 2, 0, -1, 0, 1, 2, 3, 2) },
+    @{ Id = 'rpg';        S = 'Jeux';           N = 'RPG / aventure : immersion';        B = @(3, 3, 2, 0, 0, 0, 1, 2, 3, 3) },
+    @{ Id = 'combat';     S = 'Jeux';           N = 'Combat';                            B = @(3, 3, 1, 0, 0, 1, 2, 3, 2, 1) },
+    @{ Id = 'horreur';    S = 'Jeux';           N = 'Horreur : ambiance';                B = @(4, 3, 1, 0, -1, 0, 2, 3, 4, 3) },
+    @{ Id = 'sport';      S = 'Jeux';           N = 'Sport : commentaires et public';    B = @(1, 1, 0, 0, 1, 2, 3, 2, 1, 0) },
+    @{ Id = 'mmo';        S = 'Jeux';           N = 'MMO';                               B = @(1, 1, 0, 0, 0, 1, 2, 2, 2, 1) },
+    @{ Id = 'jazz';       S = 'Musique';        N = 'Jazz';                              B = @(2, 2, 1, 0, -1, 0, 1, 2, 3, 3) },
+    @{ Id = 'rock';       S = 'Musique';        N = 'Rock';                              B = @(4, 3, 1, -1, -2, 0, 2, 3, 4, 4) },
+    @{ Id = 'pop';        S = 'Musique';        N = 'Pop';                               B = @(-1, 0, 1, 2, 3, 3, 2, 1, 0, -1) },
+    @{ Id = 'classique';  S = 'Musique';        N = 'Classique';                         B = @(2, 2, 1, 0, 0, 0, 0, 1, 2, 3) },
+    @{ Id = 'electro';    S = 'Musique';        N = 'Electro';                           B = @(5, 4, 2, 0, -2, 0, 1, 3, 4, 5) },
+    @{ Id = 'hiphop';     S = 'Musique';        N = 'Hip-hop / rap';                     B = @(5, 5, 3, 1, -1, 0, 1, 1, 2, 3) },
+    @{ Id = 'metal';      S = 'Musique';        N = 'Metal';                             B = @(4, 3, 0, -2, -3, 0, 2, 4, 4, 3) },
+    @{ Id = 'acoustique'; S = 'Musique';        N = 'Acoustique';                        B = @(1, 2, 2, 1, 0, 1, 2, 2, 2, 1) },
+    @{ Id = 'rnb';        S = 'Musique';        N = 'R&B / soul';                        B = @(4, 4, 2, 0, -1, 0, 1, 2, 2, 3) },
+    @{ Id = 'lofi';       S = 'Musique';        N = 'Lo-fi / detente';                   B = @(3, 3, 2, 1, 0, -1, -2, -3, -4, -5) },
+    @{ Id = 'basses';     S = 'Musique';        N = 'Plus de basses';                    B = @(6, 5, 4, 2, 0, 0, 0, 0, 0, 0) },
+    @{ Id = 'aigus';      S = 'Musique';        N = 'Plus d''aigus';                     B = @(0, 0, 0, 0, 0, 1, 2, 4, 5, 6) },
+    @{ Id = 'vocal';      S = 'Voix et films';  N = 'Chat vocal : voix claires';         B = @(-4, -3, -1, 0, 1, 3, 4, 3, 1, 0) },
+    @{ Id = 'podcast';    S = 'Voix et films';  N = 'Podcast / video parlee';            B = @(-3, -2, 0, 1, 2, 3, 3, 2, 0, -1) },
+    @{ Id = 'dialogues';  S = 'Voix et films';  N = 'Film : dialogues';                  B = @(-2, -1, 0, 1, 2, 3, 3, 2, 1, 0) },
+    @{ Id = 'action';     S = 'Voix et films';  N = 'Film : action';                     B = @(5, 4, 2, 0, 0, 1, 2, 3, 3, 2) },
+    @{ Id = 'nuit';       S = 'Voix et films';  N = 'Nuit : moins de basses';            B = @(-8, -6, -4, -2, 0, 1, 2, 2, 1, 0) },
+    @{ Id = 'ecouteurs';  S = 'Voix et films';  N = 'Petits ecouteurs';                  B = @(3, 3, 2, 0, 0, 0, 1, 2, 2, 2) }
+)
+# Tous les profils : ceux de GameBoost puis les profils perso (Id = 'perso:Nom')
+function Get-GBEqList {
+    $l = New-Object System.Collections.ArrayList
+    foreach ($p in $Script:EqPresets) { [void]$l.Add($p) }
+    foreach ($c in @($Script:Snd.EqCustom)) { if ($c.Name) { [void]$l.Add(@{ Id = 'perso:' + [string]$c.Name; S = 'Mes profils'; N = [string]$c.Name; B = @($c.Bands | ForEach-Object { [int]$_ }) }) } }
+    return , $l
+}
+function Get-GBEqPreset([string]$id) { foreach ($p in (Get-GBEqList)) { if ($p.Id -eq $id) { return $p } }; return $null }
+# Dossier de configuration d'Equalizer APO ($null = pas installe)
+function Get-GBEqApoDir {
+    try { $k = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\EqualizerAPO' -ErrorAction Stop; $c = [string]$k.ConfigPath; if ($c -and (Test-Path -LiteralPath $c)) { return $c.TrimEnd('\') } } catch {}
+    $d = Join-Path $env:ProgramFiles 'EqualizerAPO\config'
+    if (Test-Path -LiteralPath $d) { return $d }
+    return $null
+}
+# Ecrit les 10 bandes dans GameBoost.txt, inclus dans la configuration d'Equalizer APO (le reste de sa configuration n'est pas touche)
+function Set-GBEq($bands, [string]$name) {
+    $dir = Get-GBEqApoDir
+    if (-not $dir) { return $false }
+    try {
+        $b = @($bands | ForEach-Object { [math]::Max(-12, [math]::Min(12, [int]$_)) })
+        $safe = ([string]$name) -replace '[^\x20-\x7E]', '?'
+        $lines = @('# Fichier ecrit par GameBoost. Profil : ' + $safe)
+        $flat = ($b.Count -ne 10) -or (@($b | Where-Object { $_ -ne 0 }).Count -eq 0)
+        if (-not $flat) {
+            $max = ($b | Measure-Object -Maximum).Maximum
+            if ($max -gt 0) { $lines += ('Preamp: -' + [int]$max + ' dB') }   # evite la saturation
+            $pairs = @(); for ($i = 0; $i -lt 10; $i++) { $pairs += ([string]$Script:EqBands[$i] + ' ' + [string]$b[$i]) }
+            $lines += ('GraphicEQ: ' + ($pairs -join '; '))
+        }
+        Set-Content -LiteralPath (Join-Path $dir 'GameBoost.txt') -Value $lines -Encoding ASCII
+        $main = Join-Path $dir 'config.txt'
+        $cur = ''; if (Test-Path -LiteralPath $main) { $cur = [IO.File]::ReadAllText($main) }
+        if ($cur -notmatch '(?im)^\s*Include:\s*GameBoost\.txt') {
+            if ($cur.Length -gt 0 -and -not $cur.EndsWith("`n")) { $cur += "`r`n" }
+            [IO.File]::WriteAllText($main, $cur + "Include: GameBoost.txt`r`n")
+        }
+        return $true
+    } catch { Log ("Egaliseur : ecriture impossible (" + $_.Exception.Message + ")"); return $false }
+}
+# Applique un profil ('' ou 'off' = egaliseur coupe) et le retient
+function Set-GBEqPreset([string]$id, [switch]$Quiet) {
+    $bands = @(0, 0, 0, 0, 0, 0, 0, 0, 0, 0); $name = 'coupe'
+    if ($id -and $id -ne 'off') { $p = Get-GBEqPreset $id; if (-not $p) { return $false }; $bands = @($p.B); $name = [string]$p.N } else { $id = '' }
+    $ok = Set-GBEq $bands $name
+    if ($ok) { $Script:Snd.EqActive = $id; $Script:Snd.EqBands = @($bands); Save-GBSnd; if (-not $Quiet) { Log ("Egaliseur : " + $name) } }
+    return $ok
+}
+
+# ---------------------------------------------------------------- son : actions rapides
+function Switch-GBAudioOutput {
+    if (-not (Initialize-GBAudio)) { Log "Son : composant indisponible."; return }
+    $devs = @([GBAudio]::Devices($false)); if ($devs.Count -lt 2) { Log "Son : une seule sortie audio branchee."; return }
+    $i = 0; for ($j = 0; $j -lt $devs.Count; $j++) { if ($devs[$j].IsDefault) { $i = $j } }
+    $n = $devs[($i + 1) % $devs.Count]
+    if ([GBAudio]::SetDefault($n.Id)) { Log ("Son : sortie " + $n.Name); try { $tray.ShowBalloonTip(1200, "GameBoost", ("Sortie audio : " + $n.Name), [System.Windows.Forms.ToolTipIcon]::Info) } catch {} }
+    else { Log ("Son : Windows a refuse de passer sur " + $n.Name) }
+}
+function Switch-GBMicMute {
+    if (-not (Initialize-GBAudio)) { Log "Son : composant indisponible."; return }
+    if (-not [GBAudio]::SetDevice('', $true, -1, 2)) { Log "Son : aucun micro par defaut."; return }
+    $m = [GBAudio]::GetMute('', $true)
+    $t = "Micro actif"; if ($m) { $t = "Micro coupe" }
+    Log ("Son : " + $t.ToLower()); try { $tray.ShowBalloonTip(900, "GameBoost", $t, [System.Windows.Forms.ToolTipIcon]::Info) } catch {}
+}
+function Test-GBMicMuted { if (-not ('GBAudio' -as [type])) { return $false }; try { return [bool][GBAudio]::GetMute('', $true) } catch { return $false } }
+
+# Debut et fin du boost : macros coupees si demande, egaliseur du jeu puis retour
+function Invoke-GBExtBoost([bool]$on) {
+    try { if ('GBKeys' -as [type]) { [GBKeys]::MacrosOff = ($on -and -not [bool]$Script:Kb.MacrosInBoost); if ([GBKeys]::MacrosOff) { [GBKeys]::StopAllMacros() } } } catch {}
+    try {
+        $b = [string]$Script:Snd.EqBoost
+        if (-not $b) { return }
+        if ($on) { $Script:EqBeforeBoost = [string]$Script:Snd.EqActive; $Script:EqBoostOn = $true; [void](Set-GBEqPreset $b) }
+        elseif ($Script:EqBoostOn) {
+            $Script:EqBoostOn = $false
+            $back = [string]$Script:Snd.EqIdle; if (-not $back) { $back = [string]$Script:EqBeforeBoost }
+            [void](Set-GBEqPreset $back)
+        }
+    } catch { try { Log ("Egaliseur : " + $_.Exception.Message) } catch {} }
+}
+
+# ---------------------------------------------------------------- petites briques de fenetre
+# Liste : la derniere colonne remplit la largeur, et la ligne choisie est coloree par GameBoost
+# (la selection de Windows devient illisible en theme sombre des que la liste n'a plus le focus)
+$Script:KsCur = @{}
+function Set-GBKsFill($lv) {
+    try {
+        $n = $lv.Columns.Count; if ($n -eq 0) { return }
+        $sum = 0; for ($i = 0; $i -lt $n - 1; $i++) { $sum += $lv.Columns[$i].Width }
+        $rest = $lv.ClientSize.Width - $sum
+        if ($rest -gt 20 -and $lv.Columns[$n - 1].Width -ne $rest) { $lv.Columns[$n - 1].Width = $rest }
+    } catch {}
+}
+function Set-GBKsCurrent($lv, $item) {
+    $acc = $cCyan; if ($cAccent) { $acc = $cAccent }
+    $hi = [System.Drawing.Color]::FromArgb([int]($cPanel.R + ($acc.R - $cPanel.R) * 0.28), [int]($cPanel.G + ($acc.G - $cPanel.G) * 0.28), [int]($cPanel.B + ($acc.B - $cPanel.B) * 0.28))
+    foreach ($it in $lv.Items) {
+        $isHead = ($it.Tag -is [string] -and -not $it.Tag)
+        $bc = $cPanel; if ($it -eq $item) { $bc = $hi }
+        if ($it.BackColor -ne $bc) { $it.BackColor = $bc }
+        $fc = $cText; if ($isHead) { $fc = $cMuted }
+        if ($it.ForeColor -ne $fc) { $it.ForeColor = $fc }
+    }
+    $Script:KsCur[$lv.GetHashCode()] = $item
+}
+function New-GBKsList($parent, $x, $y, $w, $h, $cols) {
+    $lv = New-Object System.Windows.Forms.ListView
+    $lv.MultiSelect = $false
+    $lv.Location = New-Object System.Drawing.Point($x, $y); $lv.Size = New-Object System.Drawing.Size($w, $h)
+    foreach ($c in $cols) { [void]$lv.Columns.Add([string]$c[0], [int]$c[1]) }
+    Set-GBListViewStyle $lv; $parent.Controls.Add($lv)
+    Set-GBKsFill $lv
+    $lv.Add_ClientSizeChanged({ Set-GBKsFill $this })
+    # 1er gestionnaire : retient la ligne cliquee, la colore, puis retire la selection de Windows
+    $lv.Add_SelectedIndexChanged({
+        if ($this.SelectedItems.Count -eq 0) { return }
+        $it = $this.SelectedItems[0]
+        if (-not ($it.Tag -is [string] -and -not $it.Tag)) { Set-GBKsCurrent $this $it }
+        $it.Selected = $false
+    })
+    return $lv
+}
+function Get-GBKsSelected($lv) {
+    $it = $Script:KsCur[$lv.GetHashCode()]
+    if ($it -and $it.ListView -eq $lv) { return $it }
+    return $null
+}function New-GBKsText($parent, $x, $y, $w, $h, [bool]$multi = $false) {
+    $t = New-Object System.Windows.Forms.TextBox
+    $t.Location = New-Object System.Drawing.Point($x, $y); $t.Size = New-Object System.Drawing.Size($w, $h)
+    $t.BackColor = $cDeep; $t.ForeColor = $cText; $t.BorderStyle = "FixedSingle"; $t.Font = $fontUI
+    if ($multi) { $t.Multiline = $true; $t.ScrollBars = "Vertical"; $t.AcceptsReturn = $true; $t.WordWrap = $false; if ($fontMono) { $t.Font = $fontMono } }
+    $parent.Controls.Add($t); return $t
+}
+function New-GBKsCombo($parent, $x, $y, $w, $items) {
+    $c = New-GBComboCtl
+    $c.Location = New-Object System.Drawing.Point($x, $y); $c.Size = New-Object System.Drawing.Size($w, 26)
+    foreach ($i in $items) { [void]$c.Items.Add([string]$i) }
+    $parent.Controls.Add($c); return $c
+}
+# Attend une touche et renvoie son code (0 = annule)
+function Read-GBKeyPress([string]$title, [string]$msg) {
+    $r = @{ Vk = 0 }
+    $k = New-GBDialog $title 480 210
+    $k.KeyPreview = $true
+    $null = Add-DlgLabel $k $msg 20 20 430 50 $fontBold $cText
+    $null = Add-DlgLabel $k "Appuie sur la touche du clavier." 20 78 430 22 $fontUI $cMuted
+    $ca = Add-DlgLabel $k "Annuler" 20 118 120 24 $fontUI $cCyan
+    $ca.Cursor = [System.Windows.Forms.Cursors]::Hand; $ca.Add_Click({ $k.Close() })
+    $k.Add_PreviewKeyDown({ $_.IsInputKey = $true })
+    $k.Add_KeyDown({ $r.Vk = [int]$_.KeyCode; $_.Handled = $true; $_.SuppressKeyPress = $true; $k.Close() })
+    $was = $false
+    if ('GBKeys' -as [type]) { $was = [GBKeys]::Paused; [GBKeys]::Paused = $true }
+    try { [void]$k.ShowDialog() } finally { if ('GBKeys' -as [type]) { [GBKeys]::Paused = $was }; $k.Dispose() }
+    return [int]$r.Vk
+}
+# Demande un texte court (renvoie '' si annule)
+function Read-GBText([string]$title, [string]$msg, [string]$value = '') {
+    $k = New-GBDialog $title 460 200
+    $null = Add-DlgLabel $k $msg 20 18 410 22 $fontUI $cText
+    $t = New-GBKsText $k 20 48 410 26; $t.Text = $value; $t.MaxLength = 40
+    Add-DlgOkCancel $k 100 444
+    $res = ''
+    try { if ($k.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $res = $t.Text.Trim() } } finally { $k.Dispose() }
+    return $res
+}
+
+# ---------------------------------------------------------------- fenetre d'une macro
+$Script:MacroModes = @("Une fois a chaque appui", "Repete tant que la touche est maintenue", "Bascule : 1er appui demarre, 2e appui arrete")
+function Show-GBMacroEditor($m) {
+    $st = @{ Vk = [int]$m.Vk; Rec = $false; Saved = $false }
+    $d = New-GBDialog "Macro" 720 640
+    $null = Add-DlgLabel $d "Macro" 16 8 300 30 $fontPage $cCyan
+    $null = Add-DlgLabel $d "Nom" 16 52 120 22 $fontUI $cMuted
+    $tName = New-GBKsText $d 190 50 300 26; $tName.Text = [string]$m.Name; $tName.MaxLength = 40
+    $null = Add-DlgLabel $d "Touche qui la lance" 16 88 170 22 $fontUI $cMuted
+    $bKey = Add-DlgButton $d $(if ($st.Vk -gt 0) { Get-GBVkName $st.Vk } else { "Choisir..." }) 190 84 130
+    $cCtrl = Add-DlgCheck $d "Ctrl" 334 88 80 (([int]$m.Mods -band 1) -ne 0)
+    $cAlt = Add-DlgCheck $d "Alt" 418 88 80 (([int]$m.Mods -band 2) -ne 0)
+    $cShift = Add-DlgCheck $d "Maj" 502 88 80 (([int]$m.Mods -band 4) -ne 0)
+    $null = Add-DlgLabel $d "Mode" 16 124 120 22 $fontUI $cMuted
+    $cMode = New-GBKsCombo $d 190 120 400 $Script:MacroModes
+    $cMode.SelectedIndex = [math]::Max(0, [math]::Min(2, [int]$m.Mode))
+    $null = Add-DlgLabel $d "Pause entre 2 tours" 16 160 170 22 $fontUI $cMuted
+    $tGap = New-GBKsText $d 190 158 70 26; $tGap.Text = [string]([math]::Max(20, [int]$m.Gap))
+    $null = Add-DlgLabel $d "millisecondes (modes repete et bascule)" 268 160 400 22 $fontUI $cMuted
+    $null = Add-DlgLabel $d "Actions, une par ligne" 16 198 300 22 $fontBold $cText
+    $bRec = Add-DlgButton $d "Enregistrer mes frappes" 470 192 218
+    $tScript = New-GBKsText $d 16 228 672 220 $true; $tScript.Text = [string]$m.Script
+    $help = "touche A          appuie puis relache A        touche Ctrl+C    une combinaison`r`n" +
+            "appui Maj         garde Maj enfoncee           relache Maj      la relache`r`n" +
+            "attendre 50       attend 50 millisecondes      texte Bonjour    ecrit ce texte"
+    $lh = Add-DlgLabel $d $help 16 456 672 60 $fontMono $cMuted
+    $lErr = Add-DlgLabel $d "" 16 520 672 22 $fontUI $cRed
+    Add-DlgOkCancel $d 552 704
+    $okBtn = $d.AcceptButton; $caBtn = $d.CancelButton
+    $bKey.Add_Click({
+        $v = Read-GBKeyPress "Touche de la macro" "Quelle touche lance cette macro ?"
+        if ($v -gt 0) { $st.Vk = $v; $bKey.Text = Get-GBVkName $v }
+    })
+    $bRec.Add_Click({
+        if (-not $st.Rec) {
+            if (-not (Initialize-GBKeys)) { $lErr.Text = "Enregistrement indisponible (composant bloque)."; return }
+            [GBKeys]::Paused = $true
+            if (-not [GBKeys]::Start()) { [GBKeys]::Paused = $false; $lErr.Text = "Windows a refuse l'ecoute du clavier."; return }
+            $st.Rec = $true; $d.AcceptButton = $null; $d.CancelButton = $null
+            $tScript.ReadOnly = $true; $tScript.Focus() | Out-Null
+            $bRec.Text = "Arreter l'enregistrement"; $bRec.ForeColor = $cRed
+            $lErr.ForeColor = $cYellow; $lErr.Text = "Enregistrement : tape tes touches, puis clique sur Arreter."
+            [GBKeys]::StartRecord()
+        } else {
+            $ev = [GBKeys]::StopRecord(); [GBKeys]::Paused = $false
+            $st.Rec = $false; $d.AcceptButton = $okBtn; $d.CancelButton = $caBtn
+            $tScript.ReadOnly = $false; $bRec.Text = "Enregistrer mes frappes"; $bRec.ForeColor = $cCyan
+            $txt = ConvertFrom-GBKeyRecord $ev
+            if ($txt) { if ($tScript.Text.Trim()) { $tScript.Text = $tScript.Text.TrimEnd() + "`r`n" + $txt } else { $tScript.Text = $txt } }
+            $lErr.ForeColor = $cRed; $lErr.Text = ""
+        }
+    })
+    $d.Add_FormClosing({
+        if ($st.Rec) { try { [void][GBKeys]::StopRecord(); [GBKeys]::Paused = $false } catch {}; $st.Rec = $false }
+        if ($d.DialogResult -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        $p = ConvertTo-GBMacroSteps $tScript.Text
+        $msg = ''
+        if (-not $tName.Text.Trim()) { $msg = "Donne un nom a la macro." }
+        elseif ($st.Vk -le 0) { $msg = "Choisis la touche qui lance la macro." }
+        elseif ($p.Error) { $msg = $p.Error }
+        elseif ($p.Steps.Count -eq 0) { $msg = "Ajoute au moins une action." }
+        if ($msg) { $lErr.ForeColor = $cRed; $lErr.Text = $msg; $_.Cancel = $true; return }
+        $gap = 40; [void][int]::TryParse($tGap.Text.Trim(), [ref]$gap)
+        $m.Name = $tName.Text.Trim(); $m.Vk = [int]$st.Vk
+        $m.Mods = [int]$cCtrl.Checked + 2 * [int]$cAlt.Checked + 4 * [int]$cShift.Checked
+        $m.Mode = [int]$cMode.SelectedIndex; $m.Gap = [math]::Max(20, [math]::Min(60000, $gap)); $m.Script = $tScript.Text
+        $st.Saved = $true
+    })
+    try { [void]$d.ShowDialog() } finally { $d.Dispose() }
+    return [bool]$st.Saved
+}
+
+# ---------------------------------------------------------------- fenetre Clavier
+function Show-GBKeyboardPanel([int]$Tab = 0) {
+    $kb = $Script:Kb
+    $acc = $cCyan; if ($cAccent) { $acc = $cAccent }
+    $W = 840; $H = 650; $PW = $W - 16
+    $d = New-GBDialog "Clavier" $W $H
+    $null = Add-DlgLabel $d "Clavier" 16 8 300 30 $fontPage $acc
+    $swAll = Add-DlgCheck $d "Touches et macros actives" 560 14 250 ([bool]$kb.Enabled)
+    $names = @('TOUCHES', 'MACROS', 'DISPOSITION'); $tb = @(); $tp = @()
+    for ($i = 0; $i -lt 3; $i++) {
+        $b = Add-DlgButton $d $names[$i] (16 + $i * 158) 48 150 30; $b.Tag = $i; $tb += $b
+        $p = New-Object System.Windows.Forms.Panel
+        $p.Location = New-Object System.Drawing.Point(0, 88); $p.Size = New-Object System.Drawing.Size($PW, 456); $p.BackColor = $cBg; $p.Visible = $false
+        $d.Controls.Add($p); $tp += $p
+    }
+    $showTab = { param($n) for ($j = 0; $j -lt 3; $j++) { $tp[$j].Visible = ($j -eq $n); $tb[$j].ForeColor = $(if ($j -eq $n) { $cGreen } else { $cCyan }) } }
+    foreach ($b in $tb) { $b.Add_Click({ & $showTab ([int]$this.Tag) }) }
+    $status = Add-DlgLabel $d "" 16 562 600 22 $fontUI $cMuted
+    $bClose = Add-DlgButton $d "Fermer" ($W - 132) 556 100
+    $bClose.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $d.CancelButton = $bClose
+    $apply = {
+        Save-GBKb
+        $ok = Update-GBKeysEngine
+        if ($ok) { $status.ForeColor = $cMuted; $status.Text = "Enregistre : " + (Get-GBKeysSummary) + "." }
+        else { $status.ForeColor = $cRed; $status.Text = "Le clavier personnalise n'a pas pu demarrer (voir le journal)." }
+        if ($Script:Menu -and (Test-Path function:Update-GBMenu)) { try { Update-GBMenu } catch {} }
+    }
+    $swAll.Add_CheckedChanged({ $kb.Enabled = [bool]$swAll.Checked; & $apply })
+
+    # --- TOUCHES
+    $p0 = $tp[0]
+    $null = Add-DlgLabel $p0 "Change ce que fait une touche, dans tout Windows et dans les jeux. Exemple : A devient Q. La touche d'origine n'ecrit plus sa lettre. Actif tant que GameBoost est ouvert." 16 2 790 38 $fontUI $cMuted
+    $lvR = New-GBKsList $p0 16 44 790 260 @(@('Touche', 250), @('Devient', 320), @('Etat', 190))
+    $fillR = {
+        $lvR.Items.Clear()
+        foreach ($r in @($kb.Remaps)) {
+            $it = New-Object System.Windows.Forms.ListViewItem((Get-GBVkName ([int]$r.From)))
+            [void]$it.SubItems.Add($(if ([int]$r.To -gt 0) { Get-GBVkName ([int]$r.To) } else { "rien (touche desactivee)" }))
+            [void]$it.SubItems.Add($(if ($r.On) { "active" } else { "coupee" }))
+            $it.Tag = $r; [void]$lvR.Items.Add($it)
+        }
+    }
+    $addRemap = { param($f, $t)
+        foreach ($old in @($kb.Remaps | Where-Object { [int]$_.From -eq $f })) { $kb.Remaps.Remove($old) }
+        [void]$kb.Remaps.Add(@{ From = [int]$f; To = [int]$t; On = $true })
+    }
+    $bAdd = Add-DlgButton $p0 "Changer une touche..." 16 314 190
+    $bSwap = Add-DlgButton $p0 "Echanger deux touches..." 214 314 200
+    $bOff = Add-DlgButton $p0 "Desactiver une touche..." 422 314 200
+    $bTog = Add-DlgButton $p0 "Activer / couper" 16 352 160
+    $bDel = Add-DlgButton $p0 "Supprimer" 184 352 120; $bDel.ForeColor = $cRed
+    $bClr = Add-DlgButton $p0 "Tout supprimer" 312 352 150; $bClr.ForeColor = $cRed
+    $null = Add-DlgLabel $p0 "Astuce : pour passer tout le clavier en QWERTY ou en AZERTY d'un coup, utilise l'onglet DISPOSITION." 16 396 790 22 $fontUI $cMuted
+    $bAdd.Add_Click({
+        $f = Read-GBKeyPress "Changer une touche" "1/2 - Appuie sur la touche a changer."
+        if ($f -le 0) { return }
+        $t = Read-GBKeyPress "Changer une touche" ("2/2 - " + (Get-GBVkName $f) + " doit devenir quelle touche ?")
+        if ($t -le 0 -or $t -eq $f) { return }
+        & $addRemap $f $t; & $fillR; & $apply
+    })
+    $bSwap.Add_Click({
+        $f = Read-GBKeyPress "Echanger deux touches" "1/2 - Appuie sur la premiere touche."
+        if ($f -le 0) { return }
+        $t = Read-GBKeyPress "Echanger deux touches" ("2/2 - Appuie sur la touche a echanger avec " + (Get-GBVkName $f) + ".")
+        if ($t -le 0 -or $t -eq $f) { return }
+        & $addRemap $f $t; & $addRemap $t $f; & $fillR; & $apply
+    })
+    $bOff.Add_Click({
+        $f = Read-GBKeyPress "Desactiver une touche" "Appuie sur la touche a desactiver (elle ne fera plus rien)."
+        if ($f -le 0) { return }
+        & $addRemap $f 0; & $fillR; & $apply
+    })
+    $bTog.Add_Click({ $it = Get-GBKsSelected $lvR; if (-not $it) { return }; $it.Tag.On = -not [bool]$it.Tag.On; & $fillR; & $apply })
+    $bDel.Add_Click({ $it = Get-GBKsSelected $lvR; if (-not $it) { return }; $kb.Remaps.Remove($it.Tag); & $fillR; & $apply })
+    $bClr.Add_Click({
+        if ($kb.Remaps.Count -eq 0) { return }
+        $a = [System.Windows.Forms.MessageBox]::Show("Supprimer toutes les touches changees ?", "GameBoost", "YesNo", "Question")
+        if ($a -eq [System.Windows.Forms.DialogResult]::Yes) { $kb.Remaps.Clear(); & $fillR; & $apply }
+    })
+
+    # --- MACROS
+    $p1 = $tp[1]
+    $null = Add-DlgLabel $p1 "Attention : dans les jeux en ligne (League of Legends, Valorant, Fortnite, CS2...), les macros sont souvent interdites et peuvent faire bannir un compte. Par defaut, GameBoost les coupe pendant le boost." 16 2 790 38 $fontUI $cYellow
+    $swBoost = Add-DlgCheck $p1 "Garder les macros actives pendant le boost (a mes risques)" 16 46 560 ([bool]$kb.MacrosInBoost)
+    $lvM = New-GBKsList $p1 16 80 790 230 @(@('Nom', 250), @('Touche', 180), @('Mode', 210), @('Etat', 120))
+    $fillM = {
+        $lvM.Items.Clear()
+        foreach ($m in @($kb.Macros)) {
+            $it = New-Object System.Windows.Forms.ListViewItem([string]$m.Name)
+            [void]$it.SubItems.Add((Get-GBKeyComboText ([int]$m.Vk) ([int]$m.Mods)))
+            [void]$it.SubItems.Add(@("une fois", "repete (maintenue)", "bascule")[[math]::Max(0, [math]::Min(2, [int]$m.Mode))])
+            $bad = (ConvertTo-GBMacroSteps ([string]$m.Script)).Error
+            [void]$it.SubItems.Add($(if ($bad) { "erreur" } elseif ($m.On) { "active" } else { "coupee" }))
+            $it.Tag = $m; [void]$lvM.Items.Add($it)
+        }
+    }
+    $bNew = Add-DlgButton $p1 "Nouvelle macro..." 16 320 170; $bNew.ForeColor = $cGreen
+    $bEdit = Add-DlgButton $p1 "Modifier..." 194 320 120
+    $bDup = Add-DlgButton $p1 "Dupliquer" 322 320 120
+    $bMTog = Add-DlgButton $p1 "Activer / couper" 450 320 160
+    $bMDel = Add-DlgButton $p1 "Supprimer" 618 320 120; $bMDel.ForeColor = $cRed
+    $null = Add-DlgLabel $p1 "Une macro joue une suite de touches quand tu appuies sur sa touche. Exemples : ecrire un message tout fait, enchainer deux touches, repeter un clic de touche tant que tu la maintiens." 16 362 790 40 $fontUI $cMuted
+    $swBoost.Add_CheckedChanged({ $kb.MacrosInBoost = [bool]$swBoost.Checked; & $apply })
+    $bNew.Add_Click({
+        $m = @{ Name = "Macro " + ($kb.Macros.Count + 1); Vk = 0; Mods = 0; Mode = 0; Gap = 40; Script = ''; On = $true }
+        if (Show-GBMacroEditor $m) { [void]$kb.Macros.Add($m); & $fillM; & $apply } else { [void](Update-GBKeysEngine) }
+    })
+    $editM = { $it = Get-GBKsSelected $lvM; if (-not $it) { return }; if (Show-GBMacroEditor $it.Tag) { & $fillM; & $apply } else { [void](Update-GBKeysEngine) } }
+    $bEdit.Add_Click($editM); $lvM.Add_DoubleClick($editM)
+    $bDup.Add_Click({
+        $it = Get-GBKsSelected $lvM; if (-not $it) { return }; $o = $it.Tag
+        [void]$kb.Macros.Add(@{ Name = [string]$o.Name + " (copie)"; Vk = 0; Mods = [int]$o.Mods; Mode = [int]$o.Mode; Gap = [int]$o.Gap; Script = [string]$o.Script; On = $false })
+        & $fillM; & $apply
+    })
+    $bMTog.Add_Click({ $it = Get-GBKsSelected $lvM; if (-not $it) { return }; $it.Tag.On = -not [bool]$it.Tag.On; & $fillM; & $apply })
+    $bMDel.Add_Click({ $it = Get-GBKsSelected $lvM; if (-not $it) { return }; $kb.Macros.Remove($it.Tag); & $fillM; & $apply })
+
+    # --- DISPOSITION
+    $p2 = $tp[2]
+    $null = Add-DlgLabel $p2 "Passe tout le clavier d'une disposition a l'autre, pour toutes les applications. Utile pour les jeux prevus pour un clavier QWERTY (touches ZQSD / WASD)." 16 2 790 38 $fontUI $cMuted
+    $lLay = Add-DlgLabel $p2 "" 16 50 790 26 $fontBold $cText
+    $showLay = { $lLay.Text = "Disposition actuelle : " + (Get-GBKeyLayoutName) }
+    $layT = New-Object System.Windows.Forms.Timer; $layT.Interval = 400
+    $layT.Add_Tick({ $this.Stop(); & $showLay })
+    for ($i = 0; $i -lt $Script:KbLayouts.Count; $i++) {
+        $x = $Script:KbLayouts[$i]
+        $b = Add-DlgButton $p2 $x.Name (16 + ($i % 3) * 266) (92 + [math]::Floor($i / 3) * 52) 256 40
+        $b.Tag = [string]$x.Id
+        $b.Add_Click({ if (Set-GBKeyLayout ([string]$this.Tag)) { $layT.Stop(); $layT.Start() } else { $status.ForeColor = $cRed; $status.Text = "Windows n'a pas pu charger cette disposition." } })
+    }
+    $kt = ''; if (Test-Path function:Get-GBActionKey) { try { $kt = [string](Get-GBActionKey 'keys.layout') } catch {} }
+    if (-not $kt) { $kt = "aucun pour l'instant (menu GameBoost > Raccourcis clavier)" }
+    $null = Add-DlgLabel $p2 ("Raccourci pour basculer AZERTY / QWERTY, meme en jeu : " + $kt) 16 214 790 22 $fontUI $cText
+    $null = Add-DlgLabel $p2 "Windows garde la disposition choisie jusqu'a la fermeture de la session. Tu peux aussi changer avec Win+Espace." 16 240 790 22 $fontUI $cMuted
+
+    $d.Add_Shown({ & $fillR; & $fillM; & $showLay; & $showTab ([math]::Max(0, [math]::Min(2, $Tab))); $status.Text = "Etat : " + (Get-GBKeysSummary) + "." })
+    try { [void]$d.ShowDialog($form) } finally { $layT.Stop(); $layT.Dispose(); $d.Dispose() }
+}
+
+# ---------------------------------------------------------------- fenetre Son
+function Show-GBSoundPanel([int]$Tab = 0) {
+    if (-not (Initialize-GBAudio)) {
+        [System.Windows.Forms.MessageBox]::Show("Le module son n'a pas pu etre charge (composant bloque par l'antivirus ?).", "GameBoost") | Out-Null; return
+    }
+    $acc = $cCyan; if ($cAccent) { $acc = $cAccent }
+    $W = 900; $H = 690; $PW = $W - 16
+    $S = @{ Loading = $false; Out = @(); In = @(); EqId = ''; EqIds = @() }
+    $d = New-GBDialog "Son" $W $H
+    $null = Add-DlgLabel $d "Son" 16 8 300 30 $fontPage $acc
+    $names = @('APPLICATIONS', 'PERIPHERIQUES', 'EGALISEUR'); $tb = @(); $tp = @()
+    for ($i = 0; $i -lt 3; $i++) {
+        $b = Add-DlgButton $d $names[$i] (16 + $i * 178) 48 170 30; $b.Tag = $i; $tb += $b
+        $p = New-Object System.Windows.Forms.Panel
+        $p.Location = New-Object System.Drawing.Point(0, 88); $p.Size = New-Object System.Drawing.Size($PW, 496); $p.BackColor = $cBg; $p.Visible = $false
+        $d.Controls.Add($p); $tp += $p
+    }
+    $showTab = { param($n) for ($j = 0; $j -lt 3; $j++) { $tp[$j].Visible = ($j -eq $n); $tb[$j].ForeColor = $(if ($j -eq $n) { $cGreen } else { $cCyan }) } }
+    foreach ($b in $tb) { $b.Add_Click({ & $showTab ([int]$this.Tag) }) }
+    $status = Add-DlgLabel $d "" 16 602 700 22 $fontUI $cMuted
+    $bClose = Add-DlgButton $d "Fermer" ($W - 132) 596 100
+    $bClose.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $d.CancelButton = $bClose
+    $say = { param($t, $bad) $status.ForeColor = $(if ($bad) { $cRed } else { $cMuted }); $status.Text = [string]$t }
+    $devName = { param($list, $id) foreach ($x in $list) { if ($x.Id -eq $id) { return [string]$x.Name } }; return '' }
+
+    # --- APPLICATIONS
+    $p0 = $tp[0]
+    $routing = $false; try { $routing = [GBAudio]::AppRoutingAvailable() } catch {}
+    $intro = "Regle chaque application a part : son volume, la sortie ou elle joue (casque, enceintes, ecran) et le micro qu'elle ecoute. Windows retient le choix pour l'application."
+    if (-not $routing) { $intro = "Regle le volume de chaque application. Le choix de la sortie et du micro par application demande Windows 10 (version 1803) ou plus recent." }
+    $null = Add-DlgLabel $p0 $intro 16 2 850 38 $fontUI $cMuted
+    $lvA = New-GBKsList $p0 16 44 850 220 @(@('Application', 220), @('Volume', 80), @('Son', 80), @('Sortie', 235), @('Micro', 205))
+    $ed = New-Object System.Windows.Forms.Panel; $ed.BackColor = $cPanel
+    $ed.Location = New-Object System.Drawing.Point(16, 274); $ed.Size = New-Object System.Drawing.Size(850, 150); $p0.Controls.Add($ed)
+    $lApp = Add-DlgLabel $ed "Choisis une application dans la liste." 12 8 820 22 $fontBold $cText
+    $null = Add-DlgLabel $ed "Volume" 12 46 70 22 $fontUI $cMuted
+    $slA = New-GBSlider $ed 0 100 100 $null $null " %" 90 40 520
+    if ($slA.GetType().Name -eq 'GBSlider') { $slA.ValueWidth = 60 }
+    $cMuteA = Add-DlgCheck $ed "Muet" 640 44 120 $false
+    $null = Add-DlgLabel $ed "Sortie" 12 92 70 22 $fontUI $cMuted
+    $cbOut = New-GBKsCombo $ed 90 88 310 @()
+    $null = Add-DlgLabel $ed "Micro" 424 92 60 22 $fontUI $cMuted
+    $cbIn = New-GBKsCombo $ed 490 88 344 @()
+    $null = Add-DlgLabel $ed "Une application apparait ici des qu'elle joue du son ou utilise un micro." 12 122 820 20 $fontSmall $cMuted
+    $bRef = Add-DlgButton $p0 "Actualiser la liste" 16 434 180
+    $bRst = Add-DlgButton $p0 "Tout remettre par defaut" 204 434 220
+    foreach ($c in @($slA, $cMuteA, $cbOut, $cbIn)) { $c.Enabled = $false }
+    $loadApps = {
+        $S.Out = @([GBAudio]::Devices($false)); $S.In = @([GBAudio]::Devices($true))
+        $S.Loading = $true
+        $cbOut.Items.Clear(); [void]$cbOut.Items.Add("Par defaut de Windows"); foreach ($x in $S.Out) { [void]$cbOut.Items.Add([string]$x.Name) }
+        $cbIn.Items.Clear(); [void]$cbIn.Items.Add("Par defaut de Windows"); foreach ($x in $S.In) { [void]$cbIn.Items.Add([string]$x.Name) }
+        $sel = 0; $cur = Get-GBKsSelected $lvA; if ($cur) { $sel = [int]$cur.Tag.Pid }
+        $apps = [ordered]@{}
+        foreach ($ses in @([GBAudio]::Sessions($false))) { if ($ses.IsSystem -or $ses.Pid -le 0) { continue }; if (-not $apps.Contains([string]$ses.Pid)) { $apps[[string]$ses.Pid] = @{ Pid = [int]$ses.Pid; Name = [string]$ses.Name; Vol = [int]$ses.Volume; Mute = [bool]$ses.Mute; HasOut = $true } } }
+        foreach ($ses in @([GBAudio]::Sessions($true))) { if ($ses.IsSystem -or $ses.Pid -le 0) { continue }; if (-not $apps.Contains([string]$ses.Pid)) { $apps[[string]$ses.Pid] = @{ Pid = [int]$ses.Pid; Name = [string]$ses.Name; Vol = -1; Mute = $false; HasOut = $false } } }
+        $lvA.Items.Clear()
+        foreach ($a in $apps.Values) {
+            $o = ''; $m = ''
+            if ($routing) { try { $o = & $devName $S.Out ([GBAudio]::GetAppDevice($a.Pid, $false)); $m = & $devName $S.In ([GBAudio]::GetAppDevice($a.Pid, $true)) } catch {} }
+            $a.OutName = $o; $a.InName = $m
+            $it = New-Object System.Windows.Forms.ListViewItem([string]$a.Name)
+            [void]$it.SubItems.Add($(if ($a.Vol -ge 0) { [string]$a.Vol + " %" } else { "-" }))
+            [void]$it.SubItems.Add($(if (-not $a.HasOut) { "-" } elseif ($a.Mute) { "muet" } else { "actif" }))
+            [void]$it.SubItems.Add($(if ($o) { $o } else { "par defaut" })); [void]$it.SubItems.Add($(if ($m) { $m } else { "par defaut" }))
+            $it.Tag = $a; [void]$lvA.Items.Add($it)
+            if ($a.Pid -eq $sel) { $it.Selected = $true }
+        }
+        $S.Loading = $false
+        if ($lvA.Items.Count -eq 0) { & $say "Aucune application ne joue de son pour l'instant." $false }
+    }
+    $showApp = {
+        $it = Get-GBKsSelected $lvA
+        $S.Loading = $true
+        if (-not $it) { $lApp.Text = "Choisis une application dans la liste."; foreach ($c in @($slA, $cMuteA, $cbOut, $cbIn)) { $c.Enabled = $false } }
+        else {
+            $a = $it.Tag; $lApp.Text = [string]$a.Name
+            $slA.Enabled = [bool]$a.HasOut; $cMuteA.Enabled = [bool]$a.HasOut; $cbOut.Enabled = $routing; $cbIn.Enabled = $routing
+            if ($a.HasOut) { Set-SliderValue $slA $a.Vol; $cMuteA.Checked = [bool]$a.Mute }
+            $io = 0; for ($j = 0; $j -lt $S.Out.Count; $j++) { if ($S.Out[$j].Name -eq $a.OutName -and $a.OutName) { $io = $j + 1 } }
+            $ii = 0; for ($j = 0; $j -lt $S.In.Count; $j++) { if ($S.In[$j].Name -eq $a.InName -and $a.InName) { $ii = $j + 1 } }
+            if ($cbOut.Items.Count -gt $io) { $cbOut.SelectedIndex = $io }; if ($cbIn.Items.Count -gt $ii) { $cbIn.SelectedIndex = $ii }
+        }
+        $S.Loading = $false
+    }
+    $lvA.Add_SelectedIndexChanged({ if (-not $S.Loading) { & $showApp } })
+    Add-SliderCommit $slA {
+        if ($S.Loading) { return }; $it = Get-GBKsSelected $lvA; if (-not $it) { return }
+        $v = [int]$slA.Value; [void][GBAudio]::SetApp([int]$it.Tag.Pid, $v, -1); $it.Tag.Vol = $v; $it.SubItems[1].Text = [string]$v + " %"
+    }
+    $cMuteA.Add_CheckedChanged({
+        if ($S.Loading) { return }; $it = Get-GBKsSelected $lvA; if (-not $it) { return }
+        $m = [bool]$cMuteA.Checked; [void][GBAudio]::SetApp([int]$it.Tag.Pid, -1, [int]$m); $it.Tag.Mute = $m; $it.SubItems[2].Text = $(if ($m) { "muet" } else { "actif" })
+    })
+    $route = { param($combo, $capture, $col)
+        if ($S.Loading) { return }; $it = Get-GBKsSelected $lvA; if (-not $it) { return }
+        $list = $S.Out; if ($capture) { $list = $S.In }
+        $i = [int]$combo.SelectedIndex; $id = ''; $nm = ''
+        if ($i -ge 1 -and $i -le $list.Count) { $id = [string]$list[$i - 1].Id; $nm = [string]$list[$i - 1].Name }
+        $ok = $false; try { $ok = [GBAudio]::SetAppDevice([int]$it.Tag.Pid, [bool]$capture, $id) } catch {}
+        if ($ok) {
+            if ($capture) { $it.Tag.InName = $nm } else { $it.Tag.OutName = $nm }
+            $it.SubItems[$col].Text = $(if ($nm) { $nm } else { "par defaut" })
+            & $say ([string]$it.Tag.Name + " : " + $(if ($capture) { "micro " } else { "sortie " }) + $(if ($nm) { $nm } else { "par defaut de Windows" }) + ".") $false
+            Log ("Son : " + $it.Tag.Name + " -> " + $(if ($capture) { "micro " } else { "sortie " }) + $(if ($nm) { $nm } else { "par defaut" }))
+        } else { & $say ("Windows a refuse ce reglage pour " + $it.Tag.Name + " (code 0x{0:X8})." -f [GBAudio]::LastHr) $true }
+    }
+    $cbOut.Add_SelectionChangeCommitted({ & $route $cbOut $false 3 })
+    $cbIn.Add_SelectionChangeCommitted({ & $route $cbIn $true 4 })
+    $bRef.Add_Click({ & $loadApps; & $showApp })
+    $bRst.Add_Click({
+        if (-not $routing) { return }
+        foreach ($it in @($lvA.Items)) { try { [void][GBAudio]::SetAppDevice([int]$it.Tag.Pid, $false, ''); [void][GBAudio]::SetAppDevice([int]$it.Tag.Pid, $true, '') } catch {} }
+        & $loadApps; & $showApp; & $say "Toutes les applications de la liste utilisent de nouveau la sortie et le micro par defaut." $false
+    })
+
+    # --- PERIPHERIQUES
+    $p1 = $tp[1]
+    $null = Add-DlgLabel $p1 "La sortie et le micro que Windows utilise par defaut, avec leur volume." 16 2 850 22 $fontUI $cMuted
+    $half = 417
+    $mk = { param($x, $title, $capture)
+        $null = Add-DlgLabel $p1 $title $x 32 $half 22 $fontBold $cText
+        $lv = New-GBKsList $p1 $x 58 $half 190 @(@('Nom', 250), @('Volume', 70), @('', 80))
+        $bd = Add-DlgButton $p1 "Utiliser par defaut" $x 258 190
+        $cm = Add-DlgCheck $p1 "Muet" ($x + 210) 262 120 $false
+        $null = Add-DlgLabel $p1 "Volume" $x 304 70 22 $fontUI $cMuted
+        $sl = New-GBSlider $p1 0 100 100 $null $null " %" ($x + 70) 298 ($half - 70)
+        if ($sl.GetType().Name -eq 'GBSlider') { $sl.ValueWidth = 60 }
+        return @{ Lv = $lv; Def = $bd; Mute = $cm; Sl = $sl; Capture = [bool]$capture }
+    }
+    $po = & $mk 16 "Sorties (casque, enceintes, ecran)" $false
+    $pi = & $mk (16 + $half + 16) "Micros" $true
+    $fillDev = { param($g)
+        $S.Loading = $true
+        $sel = ''; $cur = Get-GBKsSelected $g.Lv; if ($cur) { $sel = [string]$cur.Tag.Id }
+        $g.Lv.Items.Clear()
+        foreach ($x in @([GBAudio]::Devices($g.Capture))) {
+            $it = New-Object System.Windows.Forms.ListViewItem([string]$x.Name)
+            [void]$it.SubItems.Add([string]$x.Volume + " %"); [void]$it.SubItems.Add($(if ($x.IsDefault) { "par defaut" } elseif ($x.Mute) { "muet" } else { "" }))
+            $it.Tag = $x; [void]$g.Lv.Items.Add($it)
+            if (($sel -and $x.Id -eq $sel) -or (-not $sel -and $x.IsDefault)) { $it.Selected = $true }
+        }
+        $it = Get-GBKsSelected $g.Lv
+        if ($it) { Set-SliderValue $g.Sl ([int]$it.Tag.Volume); $g.Mute.Checked = [bool]$it.Tag.Mute }
+        $S.Loading = $false
+    }
+    foreach ($g in @($po, $pi)) {
+        $g.Lv.Tag = $g; $g.Def.Tag = $g; $g.Mute.Tag = $g; $g.Sl.Tag = $g
+        $g.Lv.Add_SelectedIndexChanged({ if ($S.Loading) { return }; $gg = $this.Tag; $it = Get-GBKsSelected $gg.Lv; if ($it) { $S.Loading = $true; Set-SliderValue $gg.Sl ([int]$it.Tag.Volume); $gg.Mute.Checked = [bool]$it.Tag.Mute; $S.Loading = $false } })
+        $g.Def.Add_Click({
+            $gg = $this.Tag; $it = Get-GBKsSelected $gg.Lv; if (-not $it) { return }
+            if ([GBAudio]::SetDefault([string]$it.Tag.Id)) { & $say ("Par defaut : " + $it.Tag.Name + ".") $false; Log ("Son : par defaut -> " + $it.Tag.Name) } else { & $say "Windows a refuse ce changement." $true }
+            & $fillDev $gg
+        })
+        $g.Mute.Add_CheckedChanged({ if ($S.Loading) { return }; $gg = $this.Tag; $it = Get-GBKsSelected $gg.Lv; if (-not $it) { return }; [void][GBAudio]::SetDevice([string]$it.Tag.Id, $gg.Capture, -1, [int][bool]$gg.Mute.Checked); & $fillDev $gg })
+        Add-SliderCommit $g.Sl { if ($S.Loading) { return }; $gg = $this.Tag; $it = Get-GBKsSelected $gg.Lv; if (-not $it) { return }; [void][GBAudio]::SetDevice([string]$it.Tag.Id, $gg.Capture, [int]$gg.Sl.Value, -1); & $fillDev $gg }
+    }
+    $k1 = ''; $k2 = ''
+    if (Test-Path function:Get-GBActionKey) { try { $k1 = [string](Get-GBActionKey 'snd.nextout'); $k2 = [string](Get-GBActionKey 'snd.micmute') } catch {} }
+    if (-not $k1) { $k1 = 'aucun' }; if (-not $k2) { $k2 = 'aucun' }
+    $null = Add-DlgLabel $p1 "Raccourcis, meme en jeu (a regler dans le menu GameBoost > Raccourcis clavier) :" 16 356 850 22 $fontBold $cText
+    $null = Add-DlgLabel $p1 ("Passer a la sortie audio suivante : " + $k1 + "        Couper / remettre le micro : " + $k2) 16 380 850 22 $fontUI $cMuted
+
+    # --- EGALISEUR
+    $p2 = $tp[2]
+    $apo = Get-GBEqApoDir
+    if ($apo) { $null = Add-DlgLabel $p2 "Choisis un profil selon ce que tu fais, ou regle les 10 bandes toi-meme. Applique par Equalizer APO a la sortie audio." 16 2 850 22 $fontUI $cMuted }
+    else {
+        $null = Add-DlgLabel $p2 "Windows n'a pas d'egaliseur. Pour appliquer ces profils, installe Equalizer APO (logiciel libre et gratuit), puis coche ta sortie audio pendant son installation." 16 2 620 38 $fontUI $cYellow
+        $bApo = Add-DlgButton $p2 "Site d'Equalizer APO" 650 4 216
+        $bApo.Add_Click({ try { Start-Process "https://sourceforge.net/projects/equalizerapo/" } catch {} })
+    }
+    $lvE = New-GBKsList $p2 16 46 300 386 @(, @('Profil', 274))
+    $lEq = Add-DlgLabel $p2 "" 334 46 532 24 $fontBold $cText
+    $sl = @()
+    for ($i = 0; $i -lt 10; $i++) {
+        $null = Add-DlgLabel $p2 $Script:EqBandNames[$i] 334 (82 + $i * 29) 62 22 $fontUI $cMuted
+        $s1 = New-GBSlider $p2 -12 12 0 $null $null " dB" 400 (76 + $i * 29) 466
+        if ($s1.GetType().Name -eq 'GBSlider') { $s1.ValueWidth = 66 }
+        $sl += $s1
+    }
+    $bEqOn = Add-DlgButton $p2 "Appliquer" 334 374 130; $bEqOn.ForeColor = $cGreen
+    $bEqOff = Add-DlgButton $p2 "Couper l'egaliseur" 472 374 170
+    $bEqSave = Add-DlgButton $p2 "Enregistrer en profil perso..." 650 374 216
+    $bEqDel = Add-DlgButton $p2 "Supprimer ce profil perso" 650 410 216; $bEqDel.ForeColor = $cRed; $bEqDel.Visible = $false
+    $null = Add-DlgLabel $p2 "Pendant le boost" 16 446 130 22 $fontUI $cMuted
+    $cbB = New-GBKsCombo $p2 150 442 290 @()
+    $null = Add-DlgLabel $p2 "Apres le jeu" 458 446 100 22 $fontUI $cMuted
+    $cbI = New-GBKsCombo $p2 566 442 300 @()
+    $curBands = { @(foreach ($s1 in $sl) { [int]$s1.Value }) }
+    $setBands = { param($b) for ($j = 0; $j -lt 10; $j++) { $v = 0; if ($b -and @($b).Count -gt $j) { $v = [int]@($b)[$j] }; Set-SliderValue $sl[$j] $v } }
+    $fillEq = {
+        $S.Loading = $true
+        $lvE.Items.Clear(); $sec = ''
+        $all = Get-GBEqList
+        foreach ($p in $all) {
+            if ($p.S -ne $sec) { $sec = [string]$p.S; $h = New-Object System.Windows.Forms.ListViewItem(("-- " + $sec.ToUpper() + " --")); $h.ForeColor = $cMuted; $h.Tag = ''; [void]$lvE.Items.Add($h) }
+            $it = New-Object System.Windows.Forms.ListViewItem(("   " + [string]$p.N + $(if ($p.Id -eq [string]$Script:Snd.EqActive) { "   (actif)" } else { "" })))
+            $it.Tag = [string]$p.Id; [void]$lvE.Items.Add($it)
+            if ($p.Id -eq $S.EqId) { $it.Selected = $true }
+        }
+        $S.EqIds = @('', 'off') + @($all | ForEach-Object { [string]$_.Id })
+        $labels = @("(ne rien changer)", "(egaliseur coupe)") + @($all | ForEach-Object { [string]$_.S + " : " + [string]$_.N })
+        foreach ($pair in @(@($cbB, [string]$Script:Snd.EqBoost), @($cbI, [string]$Script:Snd.EqIdle))) {
+            $c = $pair[0]; $c.Items.Clear(); foreach ($l in $labels) { [void]$c.Items.Add($l) }
+            $ix = [array]::IndexOf($S.EqIds, $pair[1]); if ($ix -lt 0) { $ix = 0 }; $c.SelectedIndex = $ix
+        }
+        $S.Loading = $false
+    }
+    $pickEq = {
+        $it = Get-GBKsSelected $lvE; if (-not $it -or -not [string]$it.Tag) { return }
+        $p = Get-GBEqPreset ([string]$it.Tag); if (-not $p) { return }
+        $S.EqId = [string]$p.Id; $lEq.Text = [string]$p.S + " : " + [string]$p.N
+        & $setBands $p.B; $bEqDel.Visible = $S.EqId.StartsWith('perso:')
+    }
+    $lvE.Add_SelectedIndexChanged({ if (-not $S.Loading) { & $pickEq } })
+    $needApo = { if (Get-GBEqApoDir) { return $true }; & $say "Equalizer APO n'est pas installe : le profil est retenu mais rien ne change dans le son." $true; return $false }
+    $bEqOn.Add_Click({
+        $b = & $curBands; $p = Get-GBEqPreset $S.EqId
+        $same = $p -and (((@($p.B) -join ',')) -eq ($b -join ','))
+        if ($same) { if (& $needApo) { if (Set-GBEqPreset $S.EqId) { & $say ("Egaliseur : " + $p.N + ".") $false } else { & $say "L'ecriture du profil a echoue (voir le journal)." $true } } else { $Script:Snd.EqActive = $S.EqId; Save-GBSnd } }
+        else {
+            if (& $needApo) { if (Set-GBEq $b "reglage manuel") { & $say "Egaliseur : reglage manuel applique." $false; Log "Egaliseur : reglage manuel" } }
+            $Script:Snd.EqActive = ''; $Script:Snd.EqBands = @($b); Save-GBSnd
+        }
+        & $fillEq
+    })
+    $bEqOff.Add_Click({ if (& $needApo) { [void](Set-GBEqPreset 'off') ; & $say "Egaliseur coupe." $false } else { $Script:Snd.EqActive = ''; Save-GBSnd }; & $fillEq })
+    $bEqSave.Add_Click({
+        $n = Read-GBText "Profil perso" "Nom du profil :" ""
+        if (-not $n) { return }
+        foreach ($old in @($Script:Snd.EqCustom | Where-Object { [string]$_.Name -eq $n })) { $Script:Snd.EqCustom.Remove($old) }
+        [void]$Script:Snd.EqCustom.Add(@{ Name = $n; Bands = @(& $curBands) }); Save-GBSnd
+        $S.EqId = 'perso:' + $n; & $fillEq; & $pickEq; & $say ("Profil perso enregistre : " + $n + ".") $false
+    })
+    $bEqDel.Add_Click({
+        if (-not $S.EqId.StartsWith('perso:')) { return }
+        $n = $S.EqId.Substring(6)
+        foreach ($old in @($Script:Snd.EqCustom | Where-Object { [string]$_.Name -eq $n })) { $Script:Snd.EqCustom.Remove($old) }
+        foreach ($k in @('EqBoost', 'EqIdle', 'EqActive')) { if ([string]$Script:Snd[$k] -eq $S.EqId) { $Script:Snd[$k] = '' } }
+        Save-GBSnd; $S.EqId = 'plat'; & $fillEq; & $pickEq
+    })
+    $cbB.Add_SelectionChangeCommitted({ if ($S.Loading) { return }; $Script:Snd.EqBoost = [string]$S.EqIds[[math]::Max(0, $cbB.SelectedIndex)]; Save-GBSnd; & $say "Profil du boost enregistre." $false })
+    $cbI.Add_SelectionChangeCommitted({ if ($S.Loading) { return }; $Script:Snd.EqIdle = [string]$S.EqIds[[math]::Max(0, $cbI.SelectedIndex)]; Save-GBSnd; & $say "Profil d'apres le jeu enregistre." $false })
+
+    $d.Add_Shown({
+        try { & $loadApps; & $showApp } catch { & $say ("Applications : " + $_.Exception.Message) $true }
+        try { & $fillDev $po; & $fillDev $pi } catch {}
+        $S.EqId = [string]$Script:Snd.EqActive; if (-not $S.EqId) { $S.EqId = 'plat' }
+        try { & $fillEq; & $pickEq; if (-not [string]$Script:Snd.EqActive -and @($Script:Snd.EqBands).Count -eq 10) { & $setBands $Script:Snd.EqBands } } catch {}
+        & $showTab ([math]::Max(0, [math]::Min(2, $Tab)))
+    })
+    try { [void]$d.ShowDialog($form) } finally { $d.Dispose() }
+}
+
+# ---------------------------------------------------------------- actions (menus et raccourcis) et branchements
+function Register-GBKeysSoundActions {
+    if (-not (Test-Path function:Register-GBAction)) { return $false }
+    Register-GBAction -Id 'keys.panel' -Label 'Clavier : touches, macros, disposition...' -Menu 'Outils' -Order 20 -Run { Show-GBKeyboardPanel } -Description "Changer une touche, creer des macros, passer en AZERTY ou QWERTY"
+    Register-GBAction -Id 'keys.toggle' -Label 'Touches et macros actives' -Menu 'Outils' -Order 21 -Global -Run { $Script:Kb.Enabled = -not [bool]$Script:Kb.Enabled; Save-GBKb; [void](Update-GBKeysEngine); Log ("Clavier personnalise : " + $(if ($Script:Kb.Enabled) { "actif" } else { "coupe" })) } -Checked { [bool]$Script:Kb.Enabled } -Description "Active ou coupe d'un coup toutes les touches changees et les macros"
+    Register-GBAction -Id 'keys.layout' -Label 'Basculer AZERTY / QWERTY' -Menu 'Outils' -Order 22 -Global -Run { Switch-GBKeyLayout } -Description "Passe tout le clavier d'AZERTY a QWERTY et inversement"
+    Register-GBAction -Id 'snd.panel' -Label 'Son : applications, peripheriques, egaliseur...' -Menu 'Outils' -Order 23 -Run { Show-GBSoundPanel } -Description "Volume, sortie et micro de chaque application, egaliseur par type de jeu ou de musique"
+    Register-GBAction -Id 'snd.nextout' -Label 'Sortie audio suivante (casque / enceintes)' -Menu 'Outils' -Order 24 -Global -Run { Switch-GBAudioOutput } -Description "Passe le son de Windows sur la sortie audio suivante"
+    Register-GBAction -Id 'snd.micmute' -Label 'Couper / remettre le micro' -Menu 'Outils' -Order 25 -Global -Run { Switch-GBMicMute } -Checked { Test-GBMicMuted } -Description "Coupe ou remet le micro par defaut, pour toutes les applications"
+    return $true
+}
+if (Test-Path function:Register-GBAction) { [void](Register-GBKeysSoundActions) }
+try { Add-GBStartHook { [void](Update-GBKeysEngine) } } catch {}
+try { Add-GBCloseHook { if ('GBKeys' -as [type]) { try { [GBKeys]::Stop() } catch {} } } } catch {}
+
+# ============================================================================
+# --- RECHERCHE : trouver n'importe quelle option (Ctrl+K, ou la loupe du menu)
+#  Cherche dans toutes les actions des menus et dans tous les boutons et interrupteurs des pages.
+# ============================================================================
+function ConvertTo-GBSearchText([string]$s) {
+    if (-not $s) { return '' }
+    $n = $s.Normalize([System.Text.NormalizationForm]::FormD); $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $n.ToCharArray()) { if ([System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($ch) -ne [System.Globalization.UnicodeCategory]::NonSpacingMark) { [void]$sb.Append($ch) } }
+    return (($sb.ToString().ToLower()) -replace '\s+', ' ').Trim()
+}
+# Comparaison des mots en C# : exact, debut de mot, faute de frappe (1 lettre, 2 pour les mots longs)
+$Script:GBSearchSrc = @'
+using System;
+public static class GBSearch {
+    public static int Lev(string a, string b, int max) {
+        if (Math.Abs(a.Length - b.Length) > max) return max + 1;
+        int[] prev = new int[b.Length + 1], cur = new int[b.Length + 1];
+        for (int j = 0; j <= b.Length; j++) prev[j] = j;
+        for (int i = 1; i <= a.Length; i++) {
+            cur[0] = i; int best = cur[0];
+            for (int j = 1; j <= b.Length; j++) {
+                int c = a[i - 1] == b[j - 1] ? 0 : 1;
+                cur[j] = Math.Min(Math.Min(prev[j] + 1, cur[j - 1] + 1), prev[j - 1] + c);
+                if (cur[j] < best) best = cur[j];
+            }
+            if (best > max) return max + 1;
+            int[] t = prev; prev = cur; cur = t;
+        }
+        return prev[b.Length];
+    }
+    static int WordScore(string w, string[] words, int exact, int prefix, int fuzzy) {
+        int best = 0;
+        foreach (string x in words) {
+            int s = 0;
+            if (x == w) s = exact;
+            else if (w.Length >= 3 && (x.StartsWith(w) || (x.Length >= 4 && w.StartsWith(x)))) s = prefix;
+            else if (fuzzy > 0 && w.Length >= 5 && x.Length >= 4) { int max = w.Length >= 8 ? 2 : 1; if (Lev(w, x, max) <= max) s = fuzzy; }
+            if (s > best) { best = s; if (best == exact) break; }
+        }
+        return best;
+    }
+    // q : mots cherches ; alt[i] : mots de la meme idee que le mot i. Un score par entree (0 = ne correspond pas)
+    public static int[] Rank(string[][] titles, string[][] bodies, string[] q, string[][] alt) {
+        int[] res = new int[titles.Length];
+        int need = Math.Max(1, (int)Math.Ceiling(q.Length * 0.6));
+        // un mot connu tel quel quelque part n'est pas une faute de frappe : pas de ressemblance approximative pour lui
+        bool[] known = new bool[q.Length];
+        for (int i = 0; i < q.Length; i++)
+            for (int e = 0; e < titles.Length && !known[i]; e++)
+                known[i] = Array.IndexOf(titles[e], q[i]) >= 0 || Array.IndexOf(bodies[e], q[i]) >= 0;
+        for (int e = 0; e < titles.Length; e++) {
+            int total = 0, hit = 0;
+            for (int i = 0; i < q.Length; i++) {
+                int s = WordScore(q[i], titles[e], 30, 22, known[i] ? 0 : 12);
+                if (s < 30) { int b = WordScore(q[i], bodies[e], 10, 7, known[i] ? 0 : 4); if (b > s) s = b; }
+                if (s < 22 && alt != null && i < alt.Length && alt[i] != null)
+                    foreach (string a in alt[i]) { int t = WordScore(a, titles[e], 16, 13, 0); if (t == 0) t = WordScore(a, bodies[e], 6, 5, 0); if (t > s) s = t; }
+                if (s > 0) { hit++; total += s; }
+            }
+            res[e] = hit >= need ? total + hit * 3 : 0;
+        }
+        return res;
+    }
+}
+'@
+# Petits mots sans importance dans une phrase ("comment faire pour que mon jeu...")
+$Script:SearchStop = @{}
+foreach ($w in 'le la les un une des de du d l a au aux et ou en pour par sur dans avec sans que qui quoi comment faire fait je j tu il on mon ma mes ton ta tes ce cet cette ca c est suis ai as veux veut voudrais peux peut mettre avoir etre plus moins tres trop pas ne n y si quand me se the to my is how'.Split(' ')) { $Script:SearchStop[$w] = 1 }
+# Phrase -> mots utiles, sans accents, au singulier
+function Get-GBSearchWords([string]$text) {
+    $out = New-Object System.Collections.ArrayList
+    foreach ($w in ((ConvertTo-GBSearchText $text) -split '[^a-z0-9]+')) {
+        if ($w.Length -lt 2 -or $Script:SearchStop.ContainsKey($w)) { continue }
+        if ($w.Length -gt 3 -and ($w.EndsWith('s') -or $w.EndsWith('x'))) { $w = $w.Substring(0, $w.Length - 1) }
+        if (-not $out.Contains($w)) { [void]$out.Add($w) }
+    }
+    return [string[]]$out.ToArray([string])   # un vrai tableau de mots (une liste serait collee en une seule chaine)
+}
+# Idees : tous les mots d'une ligne veulent dire a peu pres la meme chose
+$Script:SearchIdeas = @(
+    'son audio volume bruit entendre ecouter enceinte casque sortie ecouteur',
+    'micro microphone voix parler muet vocal',
+    'fps ips image fluidite fluide performance rapide vitesse',
+    'lag rame ramer saccade ralenti lent freeze bloque boost optimiser accelerer',
+    'temperature chaud chauffe chaleur surchauffe ventilateur thermique capteur degre',
+    'ecran moniteur affichage luminosite hz frequence',
+    'clavier touche macro azerty qwerty disposition',
+    'ping internet reseau connexion latence wifi',
+    'nettoyage nettoyer espace disque place liberer cache temporaire',
+    'pilote driver nvidia amd intel mise maj',
+    'demarrage demarrer windows session automatique auto lancer',
+    'restaurer annuler defaire origine reset reinitialiser remettre',
+    'ram memoire', 'cpu processeur turbo ghz', 'gpu carte graphique',
+    'jeu partie game bibliotheque', 'modele theme apparence style look interface nexus arena pure',
+    'raccourci hotkey combinaison', 'desinstaller desinstallation supprimer enlever programme logiciel application appli',
+    'alimentation batterie energie autonomie secteur', 'confidentialite prive telemetrie pub publicite espion',
+    'fermer arreter quitter couper tuer', 'egaliseur equalizer eq musique jazz rock',
+    'overlay compteur afficher', 'diagnostic probleme panne analyser verifier', 'journal log historique')
+$Script:SearchIdeaMap = $null
+function Get-GBSearchAlt([string]$word) {
+    if (-not $Script:SearchIdeaMap) {
+        $Script:SearchIdeaMap = @{}
+        foreach ($line in $Script:SearchIdeas) {
+            $ws = @(Get-GBSearchWords $line)
+            foreach ($w in $ws) {
+                if (-not $Script:SearchIdeaMap.ContainsKey($w)) { $Script:SearchIdeaMap[$w] = New-Object System.Collections.ArrayList }
+                foreach ($o in $ws) { if ($o -ne $w -and -not $Script:SearchIdeaMap[$w].Contains($o)) { [void]$Script:SearchIdeaMap[$w].Add($o) } }
+            }
+        }
+    }
+    if ($Script:SearchIdeaMap.ContainsKey($word)) { return @($Script:SearchIdeaMap[$word]) }
+    return @()
+}
+# Besoins : ce que l'on veut faire ou le probleme que l'on a -> les bonnes options, avec l'explication
+$Script:SearchNeeds = @(
+    @{ P = 'ping|internet|connexion|reseau|latence|wifi|deconnect'; Why = "Connexion : le diagnostic mesure le ping, et l'option Reseau aide les jeux en ligne."; To = @('tools.diag', 'ctl:nagle', 'overlay.toggle') },
+    @{ P = 'lag|rame|saccad|ralenti|\blent|freeze|bloque|fluid'; Why = "Jeu qui rame : lance le boost, puis regarde ce qui freine le PC."; To = @('boost.toggle', 'level.reco', 'set.standby', 'tools.diag', 'tools.drivers') },
+    @{ P = '(plus|augment|amelior|mont|gagn|boost|bas|faible|meilleur).*(fps|ips|images)|(fps|ips|images).*(plus|augment|amelior|mont|bas|faible)'; Why = "Plus d'images par seconde : boost, niveau gaming plus fort, pilotes a jour."; To = @('boost.toggle', 'level.up', 'tools.drivers', 'gpu.settings') },
+    @{ P = '(voir|affich|compte|mesur|combien).*(fps|ips|images)|(fps|ips|images).*(voir|affich|compte|mesur)'; Why = "Voir les images par seconde pendant le jeu."; To = @('overlay.toggle', 'boost.fps', 'games.hub') },
+    @{ P = 'chaud|chauff|surchauff|ventilat|bruyant|temperat|brule'; Why = "PC chaud ou bruyant : regarde les temperatures, coupe le turbo hors jeu, carte graphique en ECO."; To = @('sensors.panel', 'turbo.toggle', 'gpu.toggle', 'turbo.settings') },
+    @{ P = '(pas|plus|aucun|sans|marche|entend).*(son|audio)|(son|audio).*(pas|plus|aucun|marche|coupe)|entend rien'; Why = "Probleme de son : verifie la sortie utilisee et le volume de l'application."; To = @('snd.panel', 'snd.nextout') },
+    @{ P = 'micro'; Why = "Micro : le couper ou le remettre, ou choisir le micro de chaque application."; To = @('snd.micmute', 'snd.panel') },
+    @{ P = 'casque|enceinte|haut.?parleur|ecouteur'; Why = "Changer de sortie audio (casque, enceintes, ecran)."; To = @('snd.nextout', 'snd.panel') },
+    @{ P = 'musique|jazz|rock|basses|aigus|egalis|equali'; Why = "Egaliseur : un profil par style de musique ou de jeu."; To = @('snd.panel') },
+    @{ P = 'espace|place|disque plein|nettoy|liberer|stockage'; Why = "Liberer de la place : nettoyage de Windows et desinstallation complete."; To = @('tools.wincfg', 'tools.uninstall') },
+    @{ P = 'batterie|autonomie|economi'; Why = "Autonomie : turbo coupe hors jeu et carte graphique en ECO."; To = @('turbo.toggle', 'gpu.toggle', 'set.power') },
+    @{ P = '(eteind|noir|deuxieme|second|autre|rallum).*ecran|ecran.*(eteind|noir|deuxieme|second|rallum)'; Why = "Eteindre ou rallumer un ecran."; To = @('screen.panel', 'screen.allon') },
+    @{ P = 'lumino|sombre|trop clair|eblou'; Why = "Luminosite de l'ecran."; To = @('display.bright.up', 'display.bright.down', 'tray.panel') },
+    @{ P = 'annul|defaire|comme avant|restaur|casse|bug depuis|remettre|origine'; Why = "Revenir en arriere : TOUT RESTAURER remet Windows comme avant GameBoost."; To = @('tools.restore') },
+    @{ P = 'zqsd|wasd|qwerty|azerty|disposition'; Why = "Clavier AZERTY ou QWERTY."; To = @('keys.layout', 'keys.panel') },
+    @{ P = 'macro|remap|changer.*touche|touche.*(chang|invers|echang|desactiv)'; Why = "Changer une touche ou creer une macro."; To = @('keys.panel', 'keys.toggle') },
+    @{ P = 'demarr|au lancement|allum.*pc|ouverture de session'; Why = "Lancer GameBoost tout seul avec Windows."; To = @('startup.toggle', 'boost.auto') },
+    @{ P = 'discord|ne pas fermer|garder ouvert|ferme mes|ferme pas|liste blanche'; Why = "Choisir ce que le boost ferme ou garde ouvert."; To = @('set.close', 'set.services') },
+    @{ P = 'pilote|driver|nvidia|radeon|mise a jour|maj\b'; Why = "Pilotes et mises a jour du materiel."; To = @('tools.drivers', 'gpu.settings') },
+    @{ P = 'pub|telemetr|confidential|bloatware|preinstall|espion|vie privee'; Why = "Windows plus propre : confidentialite, pubs et applis preinstallees."; To = @('tools.wincfg') },
+    @{ P = '\bram\b|memoire'; Why = "Memoire : la vider maintenant, ou regler l'anti-saccades."; To = @('ram.purge', 'set.standby') },
+    @{ P = 'aide|conseil|comprend|quoi faire|sais pas|perdu'; Why = "Besoin d'aide : le diagnostic explique ce qui freine le PC, le rapport sert a demander conseil."; To = @('tools.diag', 'help.report', 'level.reco') },
+    @{ P = 'theme|couleur|apparence|trop compliqu|plus simple|interface|look'; Why = "Changer d'interface : NEXUS (complet), ARENA (gaming) ou PURE (simple)."; To = @('fn.edition') },
+    @{ P = 'ajout.*jeu|nouveau jeu|mon jeu.*(pas|manque)|bibliotheque'; Why = "Ajouter un jeu pour que le boost le reconnaisse."; To = @('games.add', 'games.hub') },
+    @{ P = 'tout seul|automatique|\bauto\b'; Why = "Boost automatique quand un jeu se lance."; To = @('boost.auto') })
+function Get-GBSearchIndex {
+    $l = New-Object System.Collections.ArrayList
+    foreach ($a in @($Script:GBActions.Values)) {
+        if (-not (Test-GBActionShown $a)) { continue }
+        $k = ''; try { $k = [string](Get-GBActionKey $a.Id) } catch {}
+        $ti = ([string]$a.Label) -replace '\.\.\.$', ''
+        [void]$l.Add(@{ T = $ti; W = 'Menu ' + [string]$a.Menu; D = [string]$a.Description; K = $k; Kind = 'action'; Id = [string]$a.Id })
+    }
+    $keys = @($Script:PageOrder | Where-Object { $_ }); if ($keys.Count -eq 0 -and $Script:Pages) { $keys = @($Script:Pages.Keys) }
+    foreach ($pk in $keys) {
+        $pg = $Script:Pages[$pk]; if (-not $pg -or -not $pg.Page) { continue }
+        $title = [string]$pk; try { if ($pg.Title) { $title = [string]$pg.Title } elseif ($pg.Nav -and $pg.Nav.Text) { $title = [string]$pg.Nav.Text } } catch {}
+        $stack = New-Object System.Collections.Stack; $stack.Push($pg.Page)
+        while ($stack.Count -gt 0) {
+            $c = $stack.Pop()
+            foreach ($ch in $c.Controls) { $stack.Push($ch) }
+            if ($c -isnot [System.Windows.Forms.ButtonBase]) { continue }
+            $tx = (([string]$c.Text) -replace '\s+', ' ').Trim()
+            if ($tx.Length -lt 3) { continue }
+            $ds = ''; try { $ds = [string]$tip.GetToolTip($c) } catch {}
+            [void]$l.Add(@{ T = $tx; W = 'Page ' + $title; D = $ds; K = ''; Kind = 'ctl'; Id = ''; Page = [string]$pk; Ctl = $c })
+        }
+    }
+    if (Get-Command Show-GBEditionPicker -ErrorAction Ignore) {
+        [void]$l.Add(@{ T = 'Changer de modele : NEXUS, ARENA ou PURE'; W = 'GameBoost'; D = "Trois interfaces pour le meme GameBoost : complete, gaming ou tres simple. GameBoost se relance tout seul."; K = ''; Kind = 'action'; Id = 'fn.edition'
+            Run = { $e2 = $null; try { $e2 = Show-GBEditionPicker -Owner $form } catch {}; if ($e2 -and $e2 -ne $Script:Edition) { Switch-GBEdition $e2 } } })
+    }
+    foreach ($e in $l) { $e.ST = ConvertTo-GBSearchText $e.T; $e.TW = [string[]]@(Get-GBSearchWords $e.T); $e.BW = [string[]]@(Get-GBSearchWords ($e.W + ' ' + $e.D)) }
+    return , $l
+}
+# Resultats : d'abord les conseils pour le besoin exprime, puis les options classees par ressemblance
+function Find-GBSearch($index, [string]$query) {
+    $q = ConvertTo-GBSearchText $query
+    if (-not $q) { return @($index | Where-Object { $_.Kind -eq 'action' } | Sort-Object { $_.W }, { $_.T }) }
+    $res = New-Object System.Collections.ArrayList; $seen = @{}
+    foreach ($need in $Script:SearchNeeds) {
+        if ($q -notmatch $need.P) { continue }
+        foreach ($to in $need.To) {
+            $hits = @()
+            if ($to.StartsWith('ctl:')) { $k = $to.Substring(4); $hits = @($index | Where-Object { $_.Kind -eq 'ctl' -and $_.ST.Contains($k) } | Select-Object -First 1) }
+            elseif ($to.StartsWith('label:')) { $k = $to.Substring(6); $hits = @($index | Where-Object { $_.Kind -eq 'action' -and $_.ST.Contains($k) }) }
+            else { $hits = @($index | Where-Object { $_.Kind -eq 'action' -and $_.Id -eq $to }) }
+            foreach ($hit in $hits) {
+                $key = [string]$hit.Kind + '|' + [string]$hit.Id + '|' + [string]$hit.T
+                if ($seen.ContainsKey($key)) { continue }; $seen[$key] = 1
+                $c2 = $hit.Clone(); $c2.W = 'Conseil'; $c2.D = [string]$need.Why; [void]$res.Add($c2)
+            }
+        }
+    }
+    $words = [string[]]@(Get-GBSearchWords $query)
+    if ($words.Count -gt 0) {
+        $scores = $null
+        if (-not $Script:SearchEngineTried) { $Script:SearchEngineTried = $true; try { [void](Add-GBCompiled 'GBSearch' $Script:GBSearchSrc $null 'GBSearch') } catch {} }
+        if ('GBSearch' -as [type]) {
+            try {
+                $titles = [string[][]]@(foreach ($e in $index) { , $e.TW }); $bodies = [string[][]]@(foreach ($e in $index) { , $e.BW })
+                $alt = [string[][]]@(foreach ($w in $words) { , ([string[]]@(Get-GBSearchAlt $w)) })
+                $scores = [GBSearch]::Rank($titles, $bodies, $words, $alt)
+            } catch { $scores = $null }
+        }
+        if (-not $scores) {
+            # secours sans le composant : le mot doit apparaitre tel quel
+            $scores = @(foreach ($e in $index) { $s = 0; foreach ($w in $words) { if ($e.ST.Contains($w)) { $s += 20 } elseif ((($e.BW) -join ' ').Contains($w)) { $s += 8 } }; $s })
+        }
+        $ranked = New-Object System.Collections.ArrayList
+        for ($i = 0; $i -lt $index.Count; $i++) { if ($scores[$i] -gt 0) { $e = $index[$i]; [void]$ranked.Add(@{ E = $e; Score = [int]$scores[$i] + $(if ($e.Kind -eq 'action') { 2 } else { 0 }) + [math]::Max(0, 6 - @($e.TW).Count) }) } }
+        foreach ($x in @($ranked | Sort-Object { - $_.Score }, { $_.E.T } | Select-Object -First 60)) {
+            $e = $x.E; $key = [string]$e.Kind + '|' + [string]$e.Id + '|' + [string]$e.T
+            $k2 = 'texte|' + [string]$e.ST + '|' + [string]$e.W
+            if ($seen.ContainsKey($key) -or $seen.ContainsKey($k2)) { continue }
+            $seen[$k2] = 1
+            [void]$res.Add($e)
+        }
+    }
+    return @($res)
+}
+# Preferences d'interface (%APPDATA%\GameBoost\interface.json)
+$Script:UiPrefsFile = Join-Path $AppDir 'interface.json'
+$Script:UiPrefs = Read-GBJsonFile $Script:UiPrefsFile @{ NexusAdvanced = $false }
+# NEXUS, page Optimisations : affiche ou replie les options avancees
+function Set-GBNexusAdvanced([bool]$on, [switch]$NoSave) {
+    $a = $Script:NxAdv; if (-not $a) { return }
+    try {
+        $a.Adv.Visible = $on; $a.Mes.Visible = $on; $a.Note.Visible = (-not $on)
+        $a.Btn.Text = $(if ($on) { "Masquer les options avancees" } else { "Afficher les options avancees (11)" })
+    } catch {}
+    if (-not $NoSave) {
+        $Script:UiPrefs.NexusAdvanced = $on
+        try { $Script:UiPrefs | ConvertTo-Json | Set-Content -LiteralPath $Script:UiPrefsFile -Encoding UTF8 } catch {}
+    }
+}
+# Montre une option d'une page : ouvre la page, amene l'option a l'ecran et la fait clignoter
+function Show-GBSearchTarget($e) {
+    if ($e.Run) { & $e.Run; return }
+    if ($e.Kind -eq 'action') { [void](Invoke-GBAction $e.Id 'search'); return }
+    try { Show-GBPage $e.Page } catch {}
+    $c = $e.Ctl; if (-not $c -or $c.IsDisposed) { return }
+    try { if (-not $c.Visible -and $Script:NxAdv) { Set-GBNexusAdvanced $true } } catch {}
+    try { $p = $c.Parent; while ($p) { if ($p -is [System.Windows.Forms.ScrollableControl] -and $p.AutoScroll) { $p.ScrollControlIntoView($c) }; $p = $p.Parent } } catch {}
+    try { [void]$c.Focus() } catch {}
+    $acc = $cCyan; if ($cAccent) { $acc = $cAccent }
+    if ($Script:SearchFlashT) { try { $Script:SearchFlashT.Stop(); if ($Script:SearchFlash.Ctl -and -not $Script:SearchFlash.Ctl.IsDisposed) { $Script:SearchFlash.Ctl.BackColor = $Script:SearchFlash.Back } } catch {} }
+    $Script:SearchFlash = @{ Ctl = $c; Back = $c.BackColor; Hi = $acc; N = 0 }
+    if (-not $Script:SearchFlashT) {
+        $Script:SearchFlashT = New-Object System.Windows.Forms.Timer; $Script:SearchFlashT.Interval = 170
+        $Script:SearchFlashT.Add_Tick({
+            $st = $Script:SearchFlash
+            try {
+                if (-not $st.Ctl -or $st.Ctl.IsDisposed) { $this.Stop(); return }
+                $st.N++
+                if ($st.N -ge 7) { $st.Ctl.BackColor = $st.Back; $st.Ctl.Invalidate(); $this.Stop(); return }
+                $st.Ctl.BackColor = $(if ($st.N % 2 -eq 1) { $st.Hi } else { $st.Back }); $st.Ctl.Invalidate()
+            } catch { $this.Stop() }
+        })
+    }
+    $Script:SearchFlashT.Stop(); $Script:SearchFlashT.Start()
+}
+function Show-GBSearch([string]$Query = '') {
+    $acc = $cCyan; if ($cAccent) { $acc = $cAccent }
+    $st = @{ Index = (Get-GBSearchIndex); Res = @(); Pick = $null }
+    $d = New-GBDialog "Rechercher" 700 560
+    $d.KeyPreview = $true
+    $null = Add-DlgLabel $d "Rechercher" 16 8 300 30 $fontPage $acc
+    $null = Add-DlgLabel $d "Ecris ce que tu cherches ou ton probleme : mon jeu rame, pc trop chaud, pas de son, micro..." 16 40 660 22 $fontUI $cMuted
+    $tq = New-GBKsText $d 16 68 652 30; $tq.Font = $fontBold; $tq.Text = $Query
+    $lv = New-GBKsList $d 16 104 652 330 @(@('Option', 330), @('Ou', 170), @('Raccourci', 140))
+    $ld = Add-DlgLabel $d "" 16 442 652 38 $fontUI $cText
+    $null = Add-DlgLabel $d "Fleches haut / bas : choisir.   Entree ou double-clic : y aller.   Echap : fermer." 16 486 500 22 $fontSmall $cMuted
+    $bClose = Add-DlgButton $d "Fermer" 568 480 100
+    $bClose.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $d.CancelButton = $bClose
+    $setCur = { param($i)
+        if ($lv.Items.Count -eq 0) { $ld.Text = "Rien trouve. Essaie un autre mot."; return }
+        $i = [math]::Max(0, [math]::Min($lv.Items.Count - 1, [int]$i))
+        $it = $lv.Items[$i]; Set-GBKsCurrent $lv $it; $it.EnsureVisible()
+        $e = $it.Tag; $ld.Text = $(if ($e.D) { [string]$e.D } elseif ($e.Kind -eq 'ctl') { "Ouvre la " + $e.W.ToLower() + " et montre cette option." } else { "" })
+    }
+    $fill = {
+        $st.Res = @(Find-GBSearch $st.Index $tq.Text)
+        $lv.BeginUpdate(); $lv.Items.Clear()
+        foreach ($e in $st.Res) {
+            $it = New-Object System.Windows.Forms.ListViewItem([string]$e.T)
+            [void]$it.SubItems.Add([string]$e.W); [void]$it.SubItems.Add([string]$e.K); $it.Tag = $e; [void]$lv.Items.Add($it)
+        }
+        $lv.EndUpdate()
+        & $setCur 0
+    }
+    $go = { $it = Get-GBKsSelected $lv; if (-not $it) { return }; $st.Pick = $it.Tag; $d.Close() }
+    $deb = New-Object System.Windows.Forms.Timer; $deb.Interval = 110; $deb.Add_Tick({ $this.Stop(); & $fill })
+    $tq.Add_TextChanged({ $deb.Stop(); $deb.Start() })
+    $lv.Add_SelectedIndexChanged({ $it = Get-GBKsSelected $lv; if ($it) { $e = $it.Tag; $ld.Text = $(if ($e.D) { [string]$e.D } elseif ($e.Kind -eq 'ctl') { "Ouvre la " + $e.W.ToLower() + " et montre cette option." } else { "" }) } })
+    $lv.Add_DoubleClick({ & $go })
+    $d.Add_KeyDown({
+        $cur = Get-GBKsSelected $lv; $i = 0; if ($cur) { $i = $cur.Index }
+        if ($_.KeyCode -eq 'Down') { & $setCur ($i + 1); $_.Handled = $true; $_.SuppressKeyPress = $true }
+        elseif ($_.KeyCode -eq 'Up') { & $setCur ($i - 1); $_.Handled = $true; $_.SuppressKeyPress = $true }
+        elseif ($_.KeyCode -eq 'PageDown') { & $setCur ($i + 10); $_.Handled = $true; $_.SuppressKeyPress = $true }
+        elseif ($_.KeyCode -eq 'PageUp') { & $setCur ($i - 10); $_.Handled = $true; $_.SuppressKeyPress = $true }
+        elseif ($_.KeyCode -eq 'Return') { $_.Handled = $true; $_.SuppressKeyPress = $true; & $go }
+        if (-not $tq.Focused -and $_.KeyCode -ne 'Return') { [void]$tq.Focus() }
+    })
+    $d.Add_Shown({ & $fill; [void]$tq.Focus(); $tq.SelectAll() })
+    try { [void]$d.ShowDialog($form) } finally { $deb.Stop(); $deb.Dispose(); $d.Dispose() }
+    if ($st.Pick) { try { Show-GBSearchTarget $st.Pick } catch { Log ("Recherche : " + $_.Exception.Message) } }
+}
+# Loupe a droite de la barre de menus (les 3 modeles ont cette barre)
+function Add-GBSearchMenuItem {
+    if (-not $Script:Menu -or $Script:Menu.IsDisposed -or $Script:SearchMenuItem) { return }
+    $it = New-Object System.Windows.Forms.ToolStripMenuItem
+    $it.Text = "Rechercher"; if ([string]$Script:Edition -eq 'Pure') { $it.Text = "Chercher" }
+    $it.Alignment = [System.Windows.Forms.ToolStripItemAlignment]::Right
+    $it.ToolTipText = "Trouver n'importe quelle option (Ctrl+K)"
+    $acc = $cCyan; if ($cAccent) { $acc = $cAccent }; $it.ForeColor = $acc
+    $it.Add_Click({ Show-GBSearch })
+    [void]$Script:Menu.Items.Add($it); $Script:SearchMenuItem = $it
+}
+if (Test-Path function:Register-GBAction) {
+    Register-GBAction -Id 'app.search' -Label 'Rechercher une option...' -Menu 'GameBoost' -Order 1 -DefaultKey 'Ctrl+K' -Run { Show-GBSearch } -Description "Tape un mot pour trouver un reglage, un outil ou une page"
+}
+try { Add-GBStartHook { Add-GBSearchMenuItem } } catch {}
 # Mise en page du modele : Build-GBLayoutNexus / Arena / Pure (NEXUS si celle du modele manque ou echoue)
 function Invoke-GBLayout {
     $fn = 'Build-GBLayout' + $Script:Edition
@@ -18466,6 +20195,27 @@ function Build-GBLayoutNexus {
     $tip.SetToolTip($chkPrio, "Le processeur s'occupe du jeu en premier.")
     $tip.SetToolTip($chkReopen, "Les applis fermees par le boost sont rouvertes quand tu arretes de jouer.")
 
+    # --- Page allegee : l'essentiel d'abord. Les options avancees sont repliees (bouton en haut a droite),
+    #     et l'explication de l'option survolee s'affiche sous le titre (2 lignes).
+    $Script:NxOptSub = @($pgOpt.Controls | Where-Object { $_ -is [System.Windows.Forms.Label] -and $_.Location.Y -eq 47 })[0]
+    $Script:NxOptSubText = "Tout est remis comme avant apres la partie. Survole une option pour voir ce qu'elle fait."
+    if ($Script:NxOptSub) { $Script:NxOptSub.Location = New-Object System.Drawing.Point($Pad, 44); $Script:NxOptSub.Size = New-Object System.Drawing.Size($Inner, 36); $Script:NxOptSub.Text = $Script:NxOptSubText }
+    foreach ($c in @($chkClose, $chkForce, $chkServices, $chkRam, $chkPower, $chkPrio, $chkLowBg, $chkReopen, $chkStandby, $chkDvr, $chkRP, $chkGpuPref, $chkGpu, $chkPlan, $chkNetwork, $chkMouse, $chkFps, $chkMeasure, $chkStartup)) {
+        $c.Add_MouseEnter({ try { $h = [string]$tip.GetToolTip($this); if ($h -and $Script:NxOptSub) { $Script:NxOptSub.ForeColor = $cText; $Script:NxOptSub.Text = $h } } catch {} })
+        $c.Add_MouseLeave({ try { if ($Script:NxOptSub) { $Script:NxOptSub.ForeColor = $cMuted; $Script:NxOptSub.Text = $Script:NxOptSubText } } catch {} })
+    }
+    $advBtn = New-GBButtonCtl
+    Set-GBPlace $advBtn $pgOpt ($Pad + $Inner - 270) 14 270 28
+    $advNote = New-GBCard $pgOpt $Pad 358 $Inner 112 "Options avancees" "masquees pour garder la page simple" $cViolet
+    $null = New-GBLabelIn $advNote "Anti-saccades, enregistrement Xbox, point de restauration, carte graphique des portables, reseau, souris, mesure des FPS, demarrage avec Windows." 16 38 ($Inner - 32) 36 $fontUI $cText
+    $null = New-GBLabelIn $advNote "Une option precise ? Cherche-la avec Ctrl+K." 16 78 ($Inner - 32 - 190) 20 $fontSmall $cMuted
+    $advShow = New-GBButtonCtl; $advShow.Text = "Afficher"; $advShow.ForeColor = $cGreen
+    Set-GBPlace $advShow $advNote ($Inner - 16 - 170) 72 170 28
+    $Script:NxAdv = @{ Adv = $cardAdv; Mes = $cardMes; Note = $advNote; Btn = $advBtn }
+    $advBtn.Add_Click({ Set-GBNexusAdvanced (-not [bool]$Script:UiPrefs.NexusAdvanced) })
+    $advShow.Add_Click({ Set-GBNexusAdvanced $true })
+    Set-GBNexusAdvanced ([bool]$Script:UiPrefs.NexusAdvanced) -NoSave
+
     # --- Page Capteurs (module capteurs) : 4 cartes avec courbes 10 min, et les boutons qui refroidissent
     $pgSens = $null; $Script:NxSensCards = $null
     if ($hasSens) {
@@ -18500,22 +20250,22 @@ function Build-GBLayoutNexus {
     }
 
     # --- Page Outils : tuiles (ecrans, lancements lies et raccourcis si les modules sont la)
-    $pgTools = New-GBPage "Outils" "Reglages de Windows, pilotes, nettoyage et diagnostic. Tout ce qui change Windows est annulable."
+    $pgTools = New-GBPage "Outils" "Par famille : jeu (bleu), materiel (vert), Windows (violet), GameBoost (jaune). Une option introuvable ? Ctrl+K."
     $tiles = New-Object System.Collections.ArrayList
-    [void]$tiles.Add(@($btnWinCfg, "CONFIG WINDOWS", "Confidentialite, pubs, applis preinstallees, nettoyage, mises a jour...", $cViolet))
-    [void]$tiles.Add(@($btnGames, "MES PARTIES", "Historique de tes parties, FPS, overlay en jeu, sauvegardes de jeux.", $cCyan))
-    [void]$tiles.Add(@($btnUninst, "DESINSTALLATION PROFONDE", "Desinstalle un programme et supprime tous ses restes.", $cYellow))
-    [void]$tiles.Add(@($btnDrivers, "PILOTES", "Cherche et installe les pilotes certifies pour ton materiel.", $cCyan))
-    [void]$tiles.Add(@($btnDiag, "DIAGNOSTIC PC", "Ecran, RAM, disque, connexion : ce qui freine ton PC et quoi faire.", $cGreen))
-    [void]$tiles.Add(@($btnPrioApps, "PRIORITE DES APPLIS", "Regle la priorite de chaque logiciel ouvert avec un curseur.", $cYellow))
+    [void]$tiles.Add(@($btnWinCfg, "CONFIG WINDOWS", "Confidentialite, pubs, applis, nettoyage.", $cViolet))
+    [void]$tiles.Add(@($btnGames, "MES PARTIES", "Historique, FPS, overlay, sauvegardes.", $cCyan))
+    [void]$tiles.Add(@($btnUninst, "DESINSTALLATION PROFONDE", "Un programme et tous ses restes.", $cYellow))
+    [void]$tiles.Add(@($btnDrivers, "PILOTES", "Pilotes certifies pour ton materiel.", $cCyan))
+    [void]$tiles.Add(@($btnDiag, "DIAGNOSTIC PC", "Ce qui freine ton PC, et quoi faire.", $cGreen))
+    [void]$tiles.Add(@($btnPrioApps, "PRIORITE DES APPLIS", "La priorite de chaque logiciel ouvert.", $cYellow))
     $Script:NxToolTiles = @{}
     if ($hasMon) {
         $b = New-GBButtonCtl; $b.Add_Click({ try { Show-MonitorsPanel } catch { Log ("Ecrans : " + $_.Exception.Message) } })
-        [void]$tiles.Add(@($b, "ECRANS", "Eteins un seul ecran quand tu en as plusieurs (raccourci au choix).", $cViolet)); $Script:NxToolTiles['screens'] = $b
+        [void]$tiles.Add(@($b, "ECRANS", "Eteindre un ecran, tout rallumer.", $cViolet)); $Script:NxToolTiles['screens'] = $b
     }
     if ($hasLinks) {
         $b = New-GBButtonCtl; $b.Add_Click({ try { Show-LinkedAppsPanel } catch { Log ("Lancements lies : " + $_.Exception.Message) } })
-        [void]$tiles.Add(@($b, "LANCEMENTS LIES", "Quand un programme se lance, un autre se lance avec lui.", $cGreen)); $Script:NxToolTiles['links'] = $b
+        [void]$tiles.Add(@($b, "LANCEMENTS LIES", "Deux programmes qui se lancent ensemble.", $cGreen)); $Script:NxToolTiles['links'] = $b
     }
     if ($hasKeys) {
         $b = New-GBButtonCtl
@@ -18525,14 +20275,30 @@ function Build-GBLayoutNexus {
         })
         [void]$tiles.Add(@($b, "RACCOURCIS CLAVIER", "Choisis la touche de chaque action, meme en jeu.", $cViolet)); $Script:NxToolTiles['keys'] = $b
     }
+    if (Test-Path function:Show-GBKeyboardPanel) {
+        $b = New-GBButtonCtl; $b.Add_Click({ try { Show-GBKeyboardPanel } catch { Log ("Clavier : " + $_.Exception.Message) } })
+        [void]$tiles.Add(@($b, "CLAVIER", "Touches, macros, AZERTY / QWERTY.", $cCyan)); $Script:NxToolTiles['kbd'] = $b
+    }
+    if (Test-Path function:Show-GBSoundPanel) {
+        $b = New-GBButtonCtl; $b.Add_Click({ try { Show-GBSoundPanel } catch { Log ("Son : " + $_.Exception.Message) } })
+        [void]$tiles.Add(@($b, "SON", "Son par appli, micro, egaliseur.", $cGreen)); $Script:NxToolTiles['sound'] = $b
+    }
     if ($hasSens -and (Test-Path function:Show-SensorsPanel)) {
         $b = New-GBButtonCtl; $b.Add_Click({ try { Show-SensorsPanel } catch { Log ("Capteurs : " + $_.Exception.Message) } })
-        [void]$tiles.Add(@($b, "TEMPERATURES", "Fenetre detaillee des capteurs, a garder ouverte a cote du jeu.", $cYellow)); $Script:NxToolTiles['sensors'] = $b
+        [void]$tiles.Add(@($b, "TEMPERATURES", "Les capteurs en detail, a cote du jeu.", $cYellow)); $Script:NxToolTiles['sensors'] = $b
     }
-    [void]$tiles.Add(@($btnExport, "RAPPORT POUR CLAUDE", "Un fichier sur ton Bureau avec ta config, le diagnostic et tes parties.", $cCyan))
+    [void]$tiles.Add(@($btnExport, "RAPPORT POUR CLAUDE", "Config, diagnostic et parties, sur le Bureau.", $cCyan))
     [void]$tiles.Add(@($btnSpecs, "COPIER LES SPECS", "Les caracteristiques du PC dans le presse-papiers.", $cCyan))
-    [void]$tiles.Add(@($btnLogs, "OUVRIR LES LOGS", "Le journal detaille et le dossier des sessions de jeu.", $cCyan))
-    [void]$tiles.Add(@($btnRestoreAll, "TOUT RESTAURER", "Remet le PC comme avant GameBoost. Clic droit : plus d'options.", $cRed))
+    [void]$tiles.Add(@($btnLogs, "OUVRIR LES LOGS", "Journal detaille et sessions de jeu.", $cCyan))
+    [void]$tiles.Add(@($btnRestoreAll, "TOUT RESTAURER", "PC comme avant GameBoost. Clic droit : options.", $cRed))
+    # Rangement par famille, une couleur par famille : jeu (bleu), materiel (vert), Windows (violet), GameBoost (jaune)
+    $famOrder = @('MES PARTIES', 'PRIORITE DES APPLIS', 'LANCEMENTS LIES', 'ECRANS', 'CLAVIER', 'SON', 'TEMPERATURES', 'PILOTES',
+                  'CONFIG WINDOWS', 'DESINSTALLATION PROFONDE', 'DIAGNOSTIC PC', 'RACCOURCIS CLAVIER', 'RAPPORT POUR CLAUDE', 'COPIER LES SPECS', 'OUVRIR LES LOGS', 'TOUT RESTAURER')
+    $famColor = @($cCyan, $cCyan, $cCyan, $cGreen, $cGreen, $cGreen, $cGreen, $cGreen, $cViolet, $cViolet, $cViolet, $cYellow, $cYellow, $cYellow, $cYellow, $cRed)
+    $sorted = New-Object System.Collections.ArrayList
+    foreach ($name in $famOrder) { foreach ($t0 in $tiles) { if ([string]$t0[1] -eq $name) { $t0[3] = $famColor[[array]::IndexOf($famOrder, $name)]; [void]$sorted.Add($t0) } } }
+    foreach ($t0 in $tiles) { if (-not $sorted.Contains($t0)) { $sorted.Insert([math]::Max(0, $sorted.Count - 1), $t0) } }
+    $tiles = $sorted
     # 2 colonnes ; jusqu'a 12 tuiles : tailles d'origine, au-dela un peu plus serrees (tout tient sans defilement) ; TOUT RESTAURER toujours en bas a droite
     $tw = [int](($Inner - 14) / 2); $x2 = $Pad + $tw + 14; $th = 70; $tg = 12
     $rows = [int][math]::Ceiling($tiles.Count / 2)
@@ -19872,22 +21638,33 @@ function Build-GBLayoutArena {
     # --- ARSENAL : tous les outils en tuiles + journal ---
     $tw5 = [int](($IW - 4 * 12) / 5); $th5 = 72
     $tools = @(
-        @($btnWinCfg, "CONFIG WINDOWS", "Confidentialite, pubs, applis, nettoyage.", $A.Violet),
-        @($btnGames, "MES PARTIES", "Historique, FPS, overlay, sauvegardes.", $cCyan),
-        @($btnDrivers, "PILOTES", "Pilotes certifies pour ton materiel.", $cCyan),
-        @($btnDiag, "DIAGNOSTIC", "Ce qui freine ton PC et quoi faire.", $A.Green),
-        @($btnPrioApps, "PRIORITES", "Priorite de chaque logiciel ouvert.", $A.Yellow),
-        @($btnUninst, "DESINSTALLER", "Programme + tous ses restes.", $A.Yellow),
-        @('screens', "ECRANS", "Eteindre un ecran, tout rallumer.", $A.Violet),
-        @('links', "LANCEMENTS LIES", "Deux .exe qui se lancent ensemble.", $cCyan),
-        @('keys', "RACCOURCIS", "Toutes les touches, personnalisables.", $A.Accent),
-        @('sensors', "CAPTEURS", "Temperatures, ventilateurs, frequences.", $A.Accent2),
-        @($btnExport, "RAPPORT CLAUDE", "Un fichier a envoyer pour des conseils.", $cCyan),
+        @($btnWinCfg, "CONFIG WINDOWS", "Pubs, applis, nettoyage.", $A.Violet),
+        @($btnGames, "MES PARTIES", "Historique, FPS, overlay.", $cCyan),
+        @($btnDrivers, "PILOTES", "Pilotes certifies.", $cCyan),
+        @($btnDiag, "DIAGNOSTIC", "Ce qui freine ton PC.", $A.Green),
+        @($btnPrioApps, "PRIORITES", "Priorite des logiciels.", $A.Yellow),
+        @($btnUninst, "DESINSTALLER", "Programme + ses restes.", $A.Yellow),
+        @('screens', "ECRANS", "Eteindre, rallumer.", $A.Violet),
+        @('links', "LANCEMENTS LIES", "Deux .exe ensemble.", $cCyan),
+        @('keys', "RACCOURCIS", "Touches des actions.", $A.Accent),
+        @('kbd', "CLAVIER", "Touches, macros, AZERTY.", $cCyan),
+        @('sound', "SON", "Par appli, egaliseur.", $A.Green),
+        @('sensors', "CAPTEURS", "Temperatures, frequences.", $A.Accent2),
+        @($btnExport, "RAPPORT CLAUDE", "Fichier pour des conseils.", $cCyan),
         @($btnSpecs, "COPIER LES SPECS", "Caracteristiques du PC.", $cCyan),
-        @($btnLogs, "LOGS", "Journal detaille et sessions.", $A.Accent2),
+        @($btnLogs, "LOGS", "Journal et sessions.", $A.Accent2),
         @('edition', "MODELE", "NEXUS, ARENA ou PURE.", $A.Accent),
-        @($btnRestoreAll, "TOUT RESTAURER", "PC comme avant GameBoost. Clic droit : options.", $A.Red)
+        @($btnRestoreAll, "TOUT RESTAURER", "PC comme avant. Clic droit.", $A.Red)
     )
+    # Rangement par famille, une couleur par famille : jeu, materiel, Windows, GameBoost
+    $famOrder = @('MES PARTIES', 'PRIORITES', 'LANCEMENTS LIES', 'ECRANS', 'CLAVIER', 'SON', 'CAPTEURS', 'PILOTES', 'CONFIG WINDOWS', 'DESINSTALLER', 'DIAGNOSTIC',
+                  'RACCOURCIS', 'MODELE', 'RAPPORT CLAUDE', 'COPIER LES SPECS', 'LOGS', 'TOUT RESTAURER')
+    $famColor = @($cCyan, $cCyan, $cCyan, $A.Green, $A.Green, $A.Green, $A.Green, $A.Green, $A.Violet, $A.Violet, $A.Violet, $A.Yellow, $A.Yellow, $A.Yellow, $A.Yellow, $A.Yellow, $A.Red)
+    $sorted = New-Object System.Collections.ArrayList
+    foreach ($name in $famOrder) { foreach ($t0 in $tools) { if ([string]$t0[1] -eq $name) { $t0[3] = $famColor[[array]::IndexOf($famOrder, $name)]; [void]$sorted.Add($t0) } } }
+    foreach ($t0 in $tools) { if (-not $sorted.Contains($t0)) { $sorted.Insert([math]::Max(0, $sorted.Count - 1), $t0) } }
+    $tools = @($sorted)
+    $trows5 = [int][math]::Ceiling($tools.Count / 5.0); if ($trows5 -gt 3) { $th5 = 58 }   # 4 rangees : tuiles un peu moins hautes
     for ($i = 0; $i -lt $tools.Count; $i++) {
         $d = $tools[$i]; $x = $P + ($i % 5) * ($tw5 + 12); $y = 16 + [math]::Floor($i / 5) * ($th5 + 12)
         $b = $d[0]
@@ -19903,13 +21680,15 @@ function Build-GBLayoutArena {
             'links'   { $b.Add_Click({ Invoke-GBArenaPanel 'Show-LinkedAppsPanel' 'Lancements lies'; Update-GBArenaQuick }) }
             'keys'    { $b.Add_Click({ Invoke-GBArenaPanel 'Show-HotkeysPanel' 'Raccourcis clavier'; Update-GBArenaState }) }
             'sensors' { $b.Add_Click({ Invoke-GBArenaPanel 'Show-SensorsPanel' 'Capteurs' }) }
+            'kbd'     { $b.Add_Click({ Invoke-GBArenaPanel 'Show-GBKeyboardPanel' 'Clavier' }) }
+            'sound'   { $b.Add_Click({ Invoke-GBArenaPanel 'Show-GBSoundPanel' 'Son' }) }
             'edition' { $b.Add_Click({
                 if (-not (Get-Command Show-GBEditionPicker -ErrorAction Ignore)) { return }
                 $e2 = $null; try { $e2 = Show-GBEditionPicker -Owner $form } catch {}
                 if ($e2 -and $e2 -ne $Script:Edition) { Switch-GBEdition $e2 } }) }
         }
     }
-    $jc = New-GBArenaSurface $pgTools $P (16 + 3 * ($th5 + 12) + 4) $IW ($PH - 16 - (16 + 3 * ($th5 + 12) + 4)) "JOURNAL" "ce que fait GameBoost, en direct" $G.Chart 0 $A.Muted
+    $jc = New-GBArenaSurface $pgTools $P (16 + $trows5 * ($th5 + 12) + 4) $IW ($PH - 16 - (16 + $trows5 * ($th5 + 12) + 4)) "JOURNAL" "ce que fait GameBoost, en direct" $G.Chart 0 $A.Muted
     Set-GBPlace $txtLog $jc 14 44 ($IW - 28) ($jc.Height - 56)
     $txtLog.Anchor = "Top, Bottom, Left, Right"; $txtLog.BorderStyle = "None"; $txtLog.BackColor = $cDeep
 
